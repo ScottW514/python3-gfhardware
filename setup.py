@@ -5,7 +5,7 @@ setup(
     author='Scott Wiederhold',
     author_email='s.e.wiederhold@gmail.com',
     url='https://github.com/ScottW514/python3-gfhardware',
-    version='0.0.1',
+    version='0.0.2',
     license='MIT',
     long_description=open('README.md').read(),
     keywords='Glowforge OpenGlow OV5648 imx6',
