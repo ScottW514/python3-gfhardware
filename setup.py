@@ -9,11 +9,11 @@ setup(
     license='MIT',
     long_description=open('README.md').read(),
     keywords='Glowforge OpenGlow OV5648 imx6',
-    packages = ['gfhardware'],
+    packages = ['gfhardware', 'gfhardware.utils'],
     ext_modules=[
             Extension(
                 name='gfhardware.cam',
-                sources=['gfhardware/cam.c', 'gfhardware/bayer.c'],
+                sources=['gfhardware/cam/gfcam.c', 'gfhardware/cam/bayer.c'],
                 libraries=["v4l2"])
     ],
     classifiers=[
