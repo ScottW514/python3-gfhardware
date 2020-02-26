@@ -184,8 +184,8 @@ static PyMethodDef MethodTable[] = {
 };
 
 
-#define MODULE_NAME "sw._input"
-#define MODULE_HELP "Python bindings to certain linux input subsystem functions"
+#define MODULE_NAME "input.evdev"
+#define MODULE_HELP "Python bindings to attach to Glowforge input switches"
 
 
 static struct PyModuleDef moduledef = {
@@ -209,7 +209,7 @@ static PyObject * moduleinit(void)
 }
 
 
-PyMODINIT_FUNC PyInit__input(void)
+PyMODINIT_FUNC PyInit__evdev(void)
 {
     return moduleinit();
 }

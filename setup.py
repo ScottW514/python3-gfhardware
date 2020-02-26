@@ -5,19 +5,19 @@ setup(
     author='Scott Wiederhold',
     author_email='s.e.wiederhold@gmail.com',
     url='https://github.com/ScottW514/python3-gfhardware',
-    version='0.0.2',
+    version='0.0.3',
     license='MIT',
     long_description=open('README.md').read(),
     keywords='Glowforge OpenGlow OV5648 imx6',
-    packages = ['gfhardware', 'gfhardware.sw', 'gfhardware.thermal', 'gfhardware.utils'],
+    packages = ['gfhardware', 'gfhardware.utils'],
     ext_modules=[
         Extension(
             name='gfhardware.cam',
-            sources=['gfhardware/cam/gfcam.c', 'gfhardware/cam/bayer.c'],
+            sources=['gfhardware/src/gfcam.c', 'gfhardware/src/bayer.c'],
             libraries=["v4l2"]),
         Extension(
-            name='gfhardware.sw._input',
-            sources=['gfhardware/sw/input.c']),
+            name='gfhardware.input.evdev',
+            sources=['gfhardware/src/evdev.c']),
     ],
     classifiers=[
         'Development Status :: 4 - Beta',
