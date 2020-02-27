@@ -5,38 +5,30 @@ https://community.openglow.org
 SPDX-License-Identifier:    MIT
 """
 import os
-from typing import Union
 
 from . import MachineState
+from .shared import read_file, write_file
 
 
 class Machine(object):
     def __init__(self):
         self._base_path = '/sys/glowforge/cnc/'
 
-    def _read(self, path: str, binary: bool = False) -> Union[str, bytes]:
-        with open(self._base_path + path, 'br' if binary else 'r') as file:
-            data = file.read()
-            return data if binary else data.strip()
-
-    def _write(self, path: str, val: Union[str, bytes], binary: bool = False):
-        with open(self._base_path + path, 'bw' if binary else 'w') as file:
-            file.write(val)
-
     def _command(self, cmd: str):
-        self._write(cmd, '1')
+        write_file(self._base_path + cmd, '1')
+
+    def _dev_seek(self, count):
+        with open('/dev/glowforge', 'w') as f:
+            os.lseek(f.fileno(), count, os.SEEK_SET)
 
     def clear_all(self):
-        with open('/dev/glowforge', 'w') as f:
-            os.lseek(f.fileno(), 0, os.SEEK_SET)
+        self._dev_seek(0)
 
     def clear_pulse_and_byte(self):
-        with open('/dev/glowforge', 'w') as f:
-            os.lseek(f.fileno(), 1, os.SEEK_SET)
+        self._dev_seek(1)
 
     def clear_position(self):
-        with open('/dev/glowforge', 'w') as f:
-            os.lseek(f.fileno(), 2, os.SEEK_SET)
+        self._dev_seek(2)
 
     def disable(self):
         self._command('disable')
@@ -46,34 +38,33 @@ class Machine(object):
 
     @property
     def faults(self) -> str:
-        return self._read('faults')
+        return read_file(self._base_path + 'faults')
 
     @property
     def ignored_faults(self) -> str:
-        return self._read('ignored_faults')
+        return read_file(self._base_path + 'ignored_faults')
 
     @ignored_faults.setter
     def ignored_faults(self, val):
-        self._write('ignored_faults', val)
+        write_file(self._base_path + 'ignored_faults', val)
 
     def laser_latch(self, val):
-        self._write('laser_latch', val)
+        write_file(self._base_path + 'laser_latch', val)
 
     def load_pulse(self, data: bytes):
-        with open('/dev/glowforge', 'bw') as f:
-            f.write(data)
+        write_file('/dev/glowforge', data, True)
 
     @property
     def motor_lock(self) -> str:
-        return self._read('motor_lock')
+        return read_file(self._base_path + 'motor_lock')
 
     @motor_lock.setter
     def motor_lock(self, val):
-        self._write('motor_lock', val)
+        write_file(self._base_path + 'motor_lock', val)
 
     @property
     def position(self) -> dict:
-        raw = self._read('position', binary=True)
+        raw = read_file(self._base_path + 'position', True)
         return {
             'x': int.from_bytes(raw[0:3], byteorder='little', signed=True),
             'y': int.from_bytes(raw[4:7], byteorder='little', signed=True),
@@ -90,11 +81,11 @@ class Machine(object):
 
     @property
     def sdma_context(self) -> str:
-        return self._read('sdma_context')
+        return read_file(self._base_path + 'sdma_context')
 
     @property
     def state(self) -> MachineState:
-        state = self._read('state')
+        state = read_file(self._base_path + 'state')
         if state == 'disabled':
             return MachineState.DISABLED
         elif state == 'idle':
@@ -108,46 +99,46 @@ class Machine(object):
 
     @property
     def step_freq(self) -> str:
-        return self._read('step_freq')
+        return read_file(self._base_path + 'step_freq')
 
     @step_freq.setter
     def step_freq(self, val):
-        self._write('step_freq', val)
+        write_file(self._base_path + 'step_freq', val)
 
     def stop(self):
         self._command('stop')
 
     @property
     def x_decay(self) -> str:
-        return self._read('x_decay')
+        return read_file(self._base_path + 'x_decay')
 
     @x_decay.setter
     def x_decay(self, val):
-        self._write('x_decay', val)
+        write_file(self._base_path + 'x_decay', val)
 
     @property
     def x_mode(self) -> str:
-        return self._read('x_mode')
+        return read_file(self._base_path + 'x_mode')
 
     @x_mode.setter
     def x_mode(self, val):
-        self._write('x_mode', val)
+        write_file(self._base_path + 'x_mode', val)
 
     @property
     def y_decay(self) -> str:
-        return self._read('y_decay')
+        return read_file(self._base_path + 'y_decay')
 
     @y_decay.setter
     def y_decay(self, val):
-        self._write('y_decay', val)
+        write_file(self._base_path + 'y_decay', val)
 
     @property
     def y_mode(self) -> str:
-        return self._read('y_mode')
+        return read_file(self._base_path + 'y_mode')
 
     @y_mode.setter
     def y_mode(self, val):
-        self._write('y_mode', val)
+        write_file(self._base_path + 'y_mode', val)
 
     def z_step(self, val):
-        self._write('z_step', val)
+        write_file(self._base_path + 'z_step', val)

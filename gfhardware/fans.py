@@ -4,6 +4,7 @@ Scott Wiederhold, s.e.wiederhold@gmail.com
 https://community.openglow.org
 SPDX-License-Identifier:    MIT
 """
+from .shared import read_file, write_file
 
 
 class Fan(object):
@@ -23,20 +24,17 @@ class Fan(object):
 
     @property
     def set_speed(self) -> int:
-        with open(self._pwm_path, 'r') as file:
-            return int(file.readline())
+        return int(read_file(self._pwm_path))
 
     @set_speed.setter
     def set_speed(self, speed: int = None):
         if speed > self._max_speed or speed < self._min_speed:
             raise ValueError("Speed must be between {} and {}.".format(self._min_speed, self._max_speed))
-        with open(self._pwm_path, 'w') as file:
-            file.write(str(speed))
+        write_file(self._pwm_path, str(speed))
 
     @property
     def get_speed(self) -> int:
-        with open(self._tach_path, 'r') as file:
-            return self._tach_calc(int(file.readline()))
+        return self._tach_calc(int(read_file(self._tach_path)))
 
     def off(self):
         self.set_speed = self._min_speed

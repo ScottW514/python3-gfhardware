@@ -35,3 +35,38 @@ class MachineState(Enum):
     RUNNING = auto(),
     DISABLED = auto(),
     FAULT = auto()
+
+
+class ButtonColor(IntEnum):
+    OFF = 0
+    WHITE = 1
+    RED = 2
+    PINK = 3
+    MAGENTA = 4
+    ORANGE = 5
+    YELLOW = 7
+    LIME = 8
+    GREEN = 9
+    TEAL = 10
+    SKYBLUE = 11
+    CYAN = 12
+    BLUE = 13
+    PURPLE = 14
+
+
+_BUTTON_COLOR = [
+    (  0,   0,   0),  # OFF
+    (255, 255, 255),  # WHITE
+    (255,   0,   0),  # RED
+    (255,   0, 128),  # PINK
+    (255,   0, 255),  # MAGENTA
+    (255, 128,   0),  # ORANGE
+    (255, 255,   0),  # YELLOW
+    (128, 255,   0),  # LIME
+    (  0, 255,   0),  # GREEN
+    (  0, 255, 128),  # TEAL
+    (  0, 128, 255),  # SKYBLUE
+    (  0, 255, 255),  # CYAN
+    (  0,   0, 255),  # BLUE
+    (128,   0, 255),  # PURPLE
+]

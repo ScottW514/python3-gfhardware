@@ -80,7 +80,7 @@ class EventIO(object):
         Return ``None`` if there are no pending input events.
         """
         # event -> (sec, usec, type, code, val)
-        event = _input.device_read(self.fd)
+        event = evdev.device_read(self.fd)
 
         if event:
             return InputEvent(*event)
@@ -92,7 +92,7 @@ class EventIO(object):
         `BlockingIOError` if there are no available events at the moment.
         """
         # events -> [(sec, usec, type, code, val), ...]
-        events = _input.device_read_many(self.fd)
+        events = evdev.device_read_many(self.fd)
 
         for event in events:
             yield InputEvent(*event)
@@ -154,7 +154,7 @@ class InputDevice(EventIO):
         -------
         Grabbing an already grabbed device will raise an ``IOError``.
         """
-        _input.ioctl_EVIOCGRAB(self.fd, 1)
+        evdev.ioctl_EVIOCGRAB(self.fd, 1)
 
     def ungrab(self):
         """
@@ -165,7 +165,7 @@ class InputDevice(EventIO):
         Releasing an already released device will raise an
         ``IOError('Invalid argument')``.
         """
-        _input.ioctl_EVIOCGRAB(self.fd, 0)
+        evdev.ioctl_EVIOCGRAB(self.fd, 0)
 
     @contextlib.contextmanager
     def grab_context(self):
@@ -182,7 +182,7 @@ class InputDevice(EventIO):
         Return current switch states.
         i.e. {<InputSwitch.DOOR1: 0>: True, <InputSwitch.DOOR1: 0>: False, ...}
         """
-        active_switches = _input.ioctl_EVIOCG_bits(self.fd, EventCode.EV_SW.value)
+        active_switches = evdev.ioctl_EVIOCG_bits(self.fd, EventCode.EV_SW.value)
         switch_states = {}
         for switch in InputSwitch:
             switch_states[switch] = True if switch.value in active_switches else False

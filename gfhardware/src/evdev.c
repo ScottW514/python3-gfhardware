@@ -209,7 +209,7 @@ static PyObject * moduleinit(void)
 }
 
 
-PyMODINIT_FUNC PyInit__evdev(void)
+PyMODINIT_FUNC PyInit_evdev(void)
 {
     return moduleinit();
 }

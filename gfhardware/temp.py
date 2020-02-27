@@ -4,6 +4,7 @@ Scott Wiederhold, s.e.wiederhold@gmail.com
 https://community.openglow.org
 SPDX-License-Identifier:    MIT
 """
+from .shared import read_file
 
 
 class TempSensor(object):
@@ -18,9 +19,8 @@ class TempSensor(object):
 
     @property
     def temp(self) -> tuple:
-        with open(self._sensor_path, 'r') as file:
-            c = self._temp_calc(int(file.readline()))
-            return c, ((c * (9 / 5)) + 32)
+        c = self._temp_calc(int(read_file(self._sensor_path)))
+        return c, ((c * (9 / 5)) + 32)
 
     def _calc(self, in_value: int) -> float:
         return float(in_value)

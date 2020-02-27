@@ -4,6 +4,7 @@ Scott Wiederhold, s.e.wiederhold@gmail.com
 https://community.openglow.org
 SPDX-License-Identifier:    MIT
 """
+from .shared import read_file, write_file
 
 
 class _WaterBase(object):
@@ -11,25 +12,15 @@ class _WaterBase(object):
         self._name = None
         self._path = None
 
-    def _read(self, path: str):
-        with open(path, 'r') as file:
-            return file.readline()
-
-    def _write(self, path: str, val: str):
-        with open(path, 'w') as file:
-            file.write(val)
-
     @property
     def name(self) -> str:
         return self._name
 
     def on(self):
-        with open(self._path, 'w') as file:
-            file.write('1')
+        write_file(self._path, '1')
 
     def off(self):
-        with open(self._path, 'w') as file:
-            file.write('0')
+        write_file(self._path, '0')
 
 
 class WaterPump(_WaterBase):
@@ -41,15 +32,13 @@ class WaterPump(_WaterBase):
 
     @property
     def heater_pwm(self) -> int:
-        with open(self._pwm_path, 'r') as file:
-            return int(file.readline())
+        return int(read_file(self._pwm_path))
 
     @heater_pwm.setter
     def heater_pwm(self, pwm: int = None):
         if pwm > 65535 or pwm < 0:
             raise ValueError("PWM must be between 0 and 65535.")
-        with open(self._pwm_path, 'w') as file:
-            file.write(str(pwm))
+        write_file(self._pwm_path, str(pwm))
 
 
 class TEC(_WaterBase):
