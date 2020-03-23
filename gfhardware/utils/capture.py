@@ -9,9 +9,9 @@ if __name__ == '__main__':
     import argparse
     from PIL import Image
     from gfhardware.cam import GFCam, GFCAM_WIDTH, GFCAM_HEIGHT, GFCAM_LID, GFCAM_HEAD
-    parser = argparse.ArgumentParser(description='Capture jpeg image from Glowforge camera.')
+    parser = argparse.ArgumentParser(description='CaptureThread jpeg image from Glowforge camera.')
     parser.add_argument('--head', action='store_true',
-                       help='Capture from head camera [default: lid camera]')
+                        help='CaptureThread from head camera [default: lid camera]')
     parser.add_argument('filename', action='store',
                         default="capture.jpeg", type=str,
                         nargs='?',

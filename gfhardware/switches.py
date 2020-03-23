@@ -8,100 +8,26 @@ Based on python-evdev
 Copyright (c) 2012-2016 Georgi Valkov. All rights reserved.
 
 """
+import logging
 import os
 import select
-import warnings
-import contextlib
+from threading import Thread
+from typing import Callable
 
-from gfhardware.input import evdev
-from gfhardware import InputSwitch, EventCode
+from gfhardware._common import *
+if os.getenv('REMOTE_DEBUG'):
+    import importlib.util
+    evdev_spec = importlib.util.spec_from_file_location(
+        "input.evdev", "/usr/lib/python3.7/site-packages/gfhardware/input/evdev.cpython-37m-arm-linux-gnueabi.so")
+    evdev = importlib.util.module_from_spec(evdev_spec)
+    evdev_spec.loader.exec_module(evdev)
+else:
+    from gfhardware.input import evdev
 
-
-class InputEvent(object):
-    """
-    A generic input event.
-    """
-    __slots__ = 'sec', 'usec', 'type', 'code', 'value'
-
-    def __init__(self, sec, usec, type, code, value):
-        self.sec = sec
-        self.usec = usec
-        self.type = type
-        self.code = code
-        self.value = value
-
-    def timestamp(self):
-        return self.sec + (self.usec / 1000000.0)
-
-    def __str__(s):
-        msg = 'event at {:f}, code {:02d}, type {:02d}, val {:02d}'
-        return msg.format(s.timestamp(), s.code, s.type, s.value)
-
-    def __repr__(s):
-        msg = '{}({!r}, {!r}, {!r}, {!r}, {!r})'
-        return msg.format(s.__class__.__name__,
-                          s.sec, s.usec, s.type, s.code, s.value)
+logger = logging.getLogger(LOGGER_NAME)
 
 
-class EventIO(object):
-    """
-    Base class for reading input events.
-
-    This class is used by :class:`InputDevice`.
-
-    - On, :class:`InputDevice` it used for reading user-generated events (e.g.
-      key presses, mouse movements) and writing feedback events (e.g. leds,
-      beeps).
-    """
-    __slots__ = 'fd'
-
-    def fileno(self):
-        """
-        Return the file descriptor to the open event device. This makes
-        it possible to pass instances directly to :func:`select.select()` and
-        :class:`asyncore.file_dispatcher`.
-        """
-        return self.fd
-
-    def read_loop(self):
-        """
-        Enter an endless :func:`select.select()` loop that yields input events.
-        """
-        while True:
-            r, w, x = select.select([self.fd], [], [])
-            for event in self.read():
-                yield event
-
-    def read_one(self):
-        """
-        Read and return a single input event as an instance of
-        :class:`InputEvent <evdev.events.InputEvent>`.
-
-        Return ``None`` if there are no pending input events.
-        """
-        # event -> (sec, usec, type, code, val)
-        event = evdev.device_read(self.fd)
-
-        if event:
-            return InputEvent(*event)
-
-    def read(self):
-        """
-        Read multiple input events from device. Return a generator object that
-        yields :class:`InputEvent <evdev.events.InputEvent>` instances. Raises
-        `BlockingIOError` if there are no available events at the moment.
-        """
-        # events -> [(sec, usec, type, code, val), ...]
-        events = evdev.device_read_many(self.fd)
-
-        for event in events:
-            yield InputEvent(*event)
-
-    def close(self):
-        pass
-
-
-class InputDevice(EventIO):
+class InputDevice(object):
     """
     A linux input device from which input events can be read.
     """
@@ -125,62 +51,51 @@ class InputDevice(EventIO):
             except OSError:
                 pass
 
-    def __str__(self):
-        msg = 'device {}'
-        return msg.format(self.path)
-
-    def __repr__(self):
-        msg = (self.__class__.__name__, self.path)
-        return '{}({!r})'.format(*msg)
-
-    def __fspath__(self):
-        return self.path
-
     def close(self):
         if self.fd > -1:
             try:
-                super().close()
                 os.close(self.fd)
             finally:
                 self.fd = -1
 
-    def grab(self):
+    def read_loop(self) -> SwitchEvent:
         """
-        Grab input device using ``EVIOCGRAB`` - other applications will
-        be unable to receive events until the device is released. Only
-        one process can hold a ``EVIOCGRAB`` on a device.
-
-        Warning
-        -------
-        Grabbing an already grabbed device will raise an ``IOError``.
+        Enter an endless :func:`select.select()` loop that yields input events.
         """
         evdev.ioctl_EVIOCGRAB(self.fd, 1)
+        try:
+            while True:
+                r, w, x = select.select([self.fd], [], [], .1)
+                if len(r) == 0:
+                    yield None
+                else:
+                    for event in self.read():
+                        yield event
+        finally:
+            evdev.ioctl_EVIOCGRAB(self.fd, 0)
 
-    def ungrab(self):
+    def read(self) -> SwitchEvent:
         """
-        Release device if it has been already grabbed (uses `EVIOCGRAB`).
+        Read multiple input events from device. Return a generator object that
+        yields :class:`InputEvent <evdev.events.InputEvent>` instances. Raises
+        `BlockingIOError` if there are no available events at the moment.
+        """
+        # events -> [(sec, usec, type, code, val), ...]
+        events = evdev.device_read_many(self.fd)
 
-        Warning
-        -------
-        Releasing an already released device will raise an
-        ``IOError('Invalid argument')``.
-        """
-        evdev.ioctl_EVIOCGRAB(self.fd, 0)
+        for event in events:
+            sec, usec, e_type, code, val = tuple(event)
+            if e_type == 5:
+                code = InputSwitch(code)
+                val = True if int(val) == 1 else False
+            elif e_type == 0:
+                code = SynCode(code)
+            yield SwitchEvent(sec, usec, e_type, code, val)
 
-    @contextlib.contextmanager
-    def grab_context(self):
-        """
-        A context manager for the duration of which only the current
-        process will be able to receive events from the device.
-        """
-        self.grab()
-        yield
-        self.ungrab()
-
-    def switch_states(self):
+    def switch_states(self) -> dict:
         """
         Return current switch states.
-        i.e. {<InputSwitch.DOOR1: 0>: True, <InputSwitch.DOOR1: 0>: False, ...}
+        i.e. {<InputSwitch.DOOR1: 0>: True, <InputSwitch.DOOR2: 1>: False, ...}
         """
         active_switches = evdev.ioctl_EVIOCG_bits(self.fd, EventCode.EV_SW.value)
         switch_states = {}
@@ -188,8 +103,42 @@ class InputDevice(EventIO):
             switch_states[switch] = True if switch.value in active_switches else False
         return switch_states
 
-    @property
-    def fn(self):
-        msg = 'Please use {0}.path instead of {0}.fn'.format(self.__class__.__name__)
-        warnings.warn(msg, DeprecationWarning, stacklevel=2)
-        return self.path
+
+class SwitchMonitor(Thread):
+    """
+    Switch Event Process Queue
+    Responds to incoming WSS events for motion actions..
+    """
+    def __init__(self, input_dev: str, event_handler: Callable[[SwitchEvent], None]):
+        """
+        Initialize Switch Event Thread
+        :param input_dev: Input Device object
+        :type input_dev: str
+        :param event_handler: Function to pass event object to
+        :type event_handler: object
+        """
+        self._input_dev = InputDevice(input_dev)
+        self.stop = False
+        self._event_handler = event_handler
+        Thread.__init__(self)
+
+    def run(self) -> None:
+        logger.debug('THREAD START')
+        for event in self._input_dev.read_loop():
+            if event is not None:
+                if event.type == 5:
+                    self._event_handler(event)
+                elif event.type == 0 and event.code == SynCode.SYN_DROPPED:
+                    logger.error('switch monitor dropped events: %s' % str(event))
+            if self.stop:
+                break
+        logger.debug('THREAD EXIT')
+
+    def switch_state(self, switch: InputSwitch) -> bool:
+        return self.all_switches().get(switch, None)
+
+    def all_switches(self) -> dict:
+        return self._input_dev.switch_states()
+
+
+__all__ = ['SwitchMonitor']

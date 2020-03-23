@@ -4,88 +4,197 @@ Scott Wiederhold, s.e.wiederhold@gmail.com
 https://community.openglow.org
 SPDX-License-Identifier:    MIT
 """
+import logging
 import os
+from typing import Union
 
-from . import MachineState
-from .shared import read_file, write_file
+from gfhardware._common import *
+
+logger = logging.getLogger(LOGGER_NAME)
 
 
-class Machine(object):
-    def __init__(self):
-        self._base_path = '/sys/glowforge/cnc/'
+class _CNC(object):
+    @staticmethod
+    def clear_all():
+        _CNC._dev_seek(0)
 
-    def _command(self, cmd: str):
-        write_file(self._base_path + cmd, '1')
+    @staticmethod
+    def clear_pulse_and_byte():
+        _CNC._dev_seek(1)
 
-    def _dev_seek(self, count):
-        with open('/dev/glowforge', 'w') as f:
+    @staticmethod
+    def clear_position():
+        _CNC._dev_seek(2)
+
+    @staticmethod
+    def _command(cmd: str):
+        write_file(SYSFS_GF_BASE + 'cnc/' + cmd, '1')
+
+    @staticmethod
+    def _dev_seek(count):
+        with open(PULS_DEVICE, 'w') as f:
             os.lseek(f.fileno(), count, os.SEEK_SET)
 
-    def clear_all(self):
-        self._dev_seek(0)
+    @staticmethod
+    def disable():
+        _CNC._command('disable')
 
-    def clear_pulse_and_byte(self):
-        self._dev_seek(1)
-
-    def clear_position(self):
-        self._dev_seek(2)
-
-    def disable(self):
-        self._command('disable')
-
-    def enable(self):
-        self._command('enable')
+    @staticmethod
+    def enable():
+        _CNC._command('enable')
 
     @property
     def faults(self) -> str:
-        return read_file(self._base_path + 'faults')
+        return read_file(SYSFS_GF_BASE + 'cnc/faults')
 
     @property
     def ignored_faults(self) -> str:
-        return read_file(self._base_path + 'ignored_faults')
+        return read_file(SYSFS_GF_BASE + 'cnc/ignored_faults')
 
-    @ignored_faults.setter
-    def ignored_faults(self, val):
-        write_file(self._base_path + 'ignored_faults', val)
-
-    def laser_latch(self, val):
-        write_file(self._base_path + 'laser_latch', val)
-
-    def load_pulse(self, data: bytes):
-        write_file('/dev/glowforge', data, True)
+    @staticmethod
+    def laser_latch(val):
+        logger.info(val)
+        write_attr(SYSFS_GF_BASE + 'cnc/laser_latch', val)
 
     @property
     def motor_lock(self) -> str:
-        return read_file(self._base_path + 'motor_lock')
-
-    @motor_lock.setter
-    def motor_lock(self, val):
-        write_file(self._base_path + 'motor_lock', val)
+        return read_file(SYSFS_GF_BASE + 'cnc/motor_lock')
 
     @property
-    def position(self) -> dict:
-        raw = read_file(self._base_path + 'position', True)
-        return {
-            'x': int.from_bytes(raw[0:3], byteorder='little', signed=True),
-            'y': int.from_bytes(raw[4:7], byteorder='little', signed=True),
-            'z': int.from_bytes(raw[8:11], byteorder='little', signed=True),
-            'bytes_processed': int.from_bytes(raw[12:15], byteorder='little', signed=False),
-            'bytes_total': int.from_bytes(raw[16:19], byteorder='little', signed=False),
-        }
+    def position(self) -> Position:
+        raw = read_file(SYSFS_GF_BASE + 'cnc/position', True)
+        return Position(
+            _CNC.position_calc(int.from_bytes(raw[0:3], byteorder='little', signed=True), self.x_mode, XY_STEP_PER_MM),
+            _CNC.position_calc(int.from_bytes(raw[4:7], byteorder='little', signed=True), self.y_mode, XY_STEP_PER_MM),
+            _CNC.position_calc(int.from_bytes(raw[8:11], byteorder='little', signed=True), 2, Z_STEP_PER_MM),
+            PulsPosition(
+                int.from_bytes(raw[16:19], byteorder='little', signed=False),
+                int.from_bytes(raw[12:15], byteorder='little', signed=False)
+            )
+        )
 
-    def resume(self):
-        self._command('resume')
+    @staticmethod
+    def position_calc(steps: int, mode: int, mm_per_step: float) -> AxisPosition:
+        mm = (steps / mode) * mm_per_step
+        return AxisPosition(steps, mm, mm / 25.4)
 
-    def run(self):
-        self._command('run')
+    @staticmethod
+    def reset():
+        _CNC.disable()
+        _CNC.set_ignored_faults(0)
+        _CNC.clear_all()
+        _CNC.set_step_freq(10000)
+        _CNC.set_x_mode(Microstep.M_8)
+        _CNC.set_y_mode(Microstep.M_8)
+        _CNC.set_x_decay(1)
+        _CNC.set_y_decay(1)
+        _CNC.set_x_current(33)
+        _CNC.set_x_current(5)
+
+    @staticmethod
+    def resume():
+        _CNC._command('resume')
+
+    @staticmethod
+    def run():
+        _CNC._command('run')
 
     @property
-    def sdma_context(self) -> str:
-        return read_file(self._base_path + 'sdma_context')
+    def sdma_context(self) -> SDMA:
+        line = read_file(SYSFS_GF_BASE + 'cnc/sdma_context').splitlines()
+        return SDMA(**{
+            'pc': line[0][3:7],
+            'rpc': line[0][12:16],
+            'spc': line[0][21:25],
+            'epc': line[0][30:34],
+            't': line[1][9:10],
+            'sf': line[1][14:15],
+            'df': line[1][19:20],
+            'lm': line[1][24:25],
+            'r0': line[2][4:12],
+            'r1': line[2][17:25],
+            'r2': line[2][30:38],
+            'r3': line[2][43:51],
+            'r4': line[2][56:64],
+            'r5': line[2][69:77],
+            'r6': line[3][4:12],
+            'r7': line[3][17:25],
+            'mda': line[3][30:38],
+            'msa': line[3][43:51],
+            'ms': line[3][56:64],
+            'md': line[3][69:77],
+            'pda': line[4][4:12],
+            'psa': line[4][17:25],
+            'ps': line[4][30:38],
+            'pd': line[4][43:51],
+            'ca': line[4][56:64],
+            'cs': line[4][69:77],
+            'dda': line[5][4:12],
+            'dsa': line[5][17:25],
+            'ds': line[5][30:38],
+            'dd': line[5][43:51],
+            'sc0': line[5][56:64],
+            'sc1': line[5][69:77],
+            'sc2': line[6][4:12],
+            'sc3': line[6][17:25],
+            'sc4': line[6][30:38],
+            'sc5': line[6][43:51],
+            'sc6': line[6][56:64],
+            'sc7': line[6][69:77],
+        })
+
+    @staticmethod
+    def set_ignored_faults(val: Union[str, int]):
+        logger.info(val)
+        write_attr(SYSFS_GF_BASE + 'cnc/ignored_faults', val)
+
+    @staticmethod
+    def set_motor_lock(val):
+        logger.info(val)
+        write_attr(SYSFS_GF_BASE + 'cnc/motor_lock', val)
+
+    @staticmethod
+    def set_step_freq(val: Union[str, int]):
+        logger.info(val)
+        write_attr(SYSFS_GF_BASE + 'cnc/step_freq', val)
+
+    @staticmethod
+    def set_x_current(val: Union[str, int]):
+        logger.info(val)
+        write_attr(SYSFS_GF_BASE + 'pic/x_step_current', val)
+
+    @staticmethod
+    def set_x_decay(val: Union[str, int]):
+        logger.info(val)
+        write_attr(SYSFS_GF_BASE + 'cnc/x_decay', val)
+
+    @staticmethod
+    def set_x_mode(val: Union[Microstep, int, str]):
+        logger.info(val)
+        if isinstance(val, Microstep):
+            val = val.value
+        write_attr(SYSFS_GF_BASE + 'cnc/x_mode', val)
+
+    @staticmethod
+    def set_y_current(val: Union[str, int]):
+        logger.info(val)
+        write_attr(SYSFS_GF_BASE + 'pic/y_step_current', val)
+
+    @staticmethod
+    def set_y_decay(val: Union[str, int]):
+        logger.info(val)
+        write_attr(SYSFS_GF_BASE + 'cnc/y_decay', val)
+
+    @staticmethod
+    def set_y_mode(val: Union[Microstep, int, str]):
+        logger.info(val)
+        if isinstance(val, Microstep):
+            val = val.value
+        write_attr(SYSFS_GF_BASE + 'cnc/y_mode', val)
 
     @property
     def state(self) -> MachineState:
-        state = read_file(self._base_path + 'state')
+        state = read_file(SYSFS_GF_BASE + 'cnc/state')
         if state == 'disabled':
             return MachineState.DISABLED
         elif state == 'idle':
@@ -98,47 +207,38 @@ class Machine(object):
             raise ValueError('Received invalid state: {}'.format(state))
 
     @property
-    def step_freq(self) -> str:
-        return read_file(self._base_path + 'step_freq')
+    def step_freq(self) -> int:
+        return int(read_file(SYSFS_GF_BASE + 'cnc/step_freq'))
 
-    @step_freq.setter
-    def step_freq(self, val):
-        write_file(self._base_path + 'step_freq', val)
-
-    def stop(self):
-        self._command('stop')
+    @staticmethod
+    def stop():
+        _CNC._command('stop')
 
     @property
-    def x_decay(self) -> str:
-        return read_file(self._base_path + 'x_decay')
-
-    @x_decay.setter
-    def x_decay(self, val):
-        write_file(self._base_path + 'x_decay', val)
+    def x_current(self) -> int:
+        return int(read_file(SYSFS_GF_BASE + 'pic/x_step_current'))
 
     @property
-    def x_mode(self) -> str:
-        return read_file(self._base_path + 'x_mode')
-
-    @x_mode.setter
-    def x_mode(self, val):
-        write_file(self._base_path + 'x_mode', val)
+    def y_current(self) -> int:
+        return int(read_file(SYSFS_GF_BASE + 'pic/y_step_current'))
 
     @property
-    def y_decay(self) -> str:
-        return read_file(self._base_path + 'y_decay')
-
-    @y_decay.setter
-    def y_decay(self, val):
-        write_file(self._base_path + 'y_decay', val)
+    def x_decay(self) -> int:
+        return int(read_file(SYSFS_GF_BASE + 'cnc/x_decay'))
 
     @property
-    def y_mode(self) -> str:
-        return read_file(self._base_path + 'y_mode')
+    def x_mode(self) -> int:
+        return int(read_file(SYSFS_GF_BASE + 'cnc/x_mode'))
 
-    @y_mode.setter
-    def y_mode(self, val):
-        write_file(self._base_path + 'y_mode', val)
+    @property
+    def y_decay(self) -> int:
+        return int(read_file(SYSFS_GF_BASE + 'cnc/y_decay'))
 
-    def z_step(self, val):
-        write_file(self._base_path + 'z_step', val)
+    @property
+    def y_mode(self) -> int:
+        return int(read_file(SYSFS_GF_BASE + 'cnc/y_mode'))
+
+
+cnc = _CNC()
+
+__all__ = ['cnc']
