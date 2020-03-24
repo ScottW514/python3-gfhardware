@@ -12,6 +12,7 @@ from time import sleep
 
 from gfutilities import BaseMachine
 from gfutilities.configuration import get_cfg
+from gfutilities.puls import generate_linear_puls
 from gfutilities.service.websocket import load_motion, img_upload, send_wss_event
 from gfutilities.device.settings import MACHINE_SETTINGS, update_settings
 
@@ -140,7 +141,7 @@ class Machine(BaseMachine):
             cnc.clear_all()
             # Download puls file from service
             logger.info('loading motion file from %s' % msg['motion_url'])
-            self._motion_stats = load_motion(self._session, msg['motion_url'], '/dev/glowforge')
+            self._motion_stats = load_motion(self._session, msg['motion_url'], PULS_DEVICE)
             logger.info('motion stats: %s' % self._motion_stats)
             if msg['action_type'] == 'print':
                 send_wss_event(self._q_msg_tx, msg['id'], 'print:download:completed')
@@ -162,10 +163,18 @@ class Machine(BaseMachine):
                     send_wss_event(self._q_msg_tx, msg['id'], 'print:running')
                 self._run_loop()
                 cnc.laser_latch(1)
+                pos = cnc.position
+                logger.info('end positions (actual/expected): X (%s/%s), Y (%s/%s), Z (%s/%s)' % (
+                    pos.x.steps, self._motion_stats['stats']['XEND'],
+                    pos.y.steps, self._motion_stats['stats']['YEND'],
+                    pos.z.steps, self._motion_stats['stats']['ZEND'],
+                ))
+                logger.info('motion bytes actual:%s, expected: %s' %
+                            (pos.bytes.processed, self._motion_stats['size']))
 
             # Cool down for prints
             if msg['action_type'] == 'print':
-                self._return_home(msg)
+                self._return_home()
                 logger.info('start cool down')
                 self._config_from_pulse('cool_down', self._motion_stats['header_data'])
                 if get_cfg('MOTION.COOL_DOWN_DELAY'):
@@ -175,18 +184,15 @@ class Machine(BaseMachine):
             logger.info('start idle')
             self._config_from_pulse('idle', self._motion_stats['header_data'])
             pos = cnc.position
-            logger.info('end positions (actual/expected): X (%s/%s), Y (%s/%s), Z (%s/%s)' % (
-                pos.x.steps, self._motion_stats['stats']['XEND'],
-                pos.y.steps, self._motion_stats['stats']['YEND'],
-                pos.z.steps, self._motion_stats['stats']['ZEND'],
-            ))
-            logger.info('motion bytes actual:%s, expected: %s' %
-                        (pos.bytes.processed, self._motion_stats['size']))
+            logger.info('end positions (%s, %s, %s)' % (pos.x.steps, pos.y.steps, pos.z.steps))
         logger.info('end motion')
 
-    def _return_home(self, msg: dict) -> None:
+    def _return_home(self) -> None:
         logger.info('start return home')
-        pass
+        pos = cnc.position
+        generate_linear_puls(pos.x.steps * -1, pos.y.steps * -1, PULS_DEVICE)
+        self._run_loop()
+        send_wss_event(self._q_msg_tx, self.running_action_id, 'print:return_to_home:succeeded')
 
     def _run_loop(self):
         logger.info('starting run')
