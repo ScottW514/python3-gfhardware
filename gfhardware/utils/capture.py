@@ -7,8 +7,7 @@ SPDX-License-Identifier:    MIT
 
 if __name__ == '__main__':
     import argparse
-    from PIL import Image
-    from gfhardware.cam import GFCam, GFCAM_WIDTH, GFCAM_HEIGHT, GFCAM_LID, GFCAM_HEAD
+    from gfhardware.cam import capture, GFCAM_WIDTH, GFCAM_HEIGHT, GFCAM_LID, GFCAM_HEAD
     parser = argparse.ArgumentParser(description='CaptureThread jpeg image from Glowforge camera.')
     parser.add_argument('--head', action='store_true',
                         help='CaptureThread from head camera [default: lid camera]')
@@ -16,10 +15,21 @@ if __name__ == '__main__':
                         default="capture.jpeg", type=str,
                         nargs='?',
                         help='Specify output filename [default: capture.jpeg]')
+    parser.add_argument('exposure', action='store',
+                        default=3000, type=int,
+                        nargs='?',
+                        help='Specify exposure [range: 0-65535, default: 3000]')
+    args = parser.parse_args()
+
+    parser.add_argument('gain', action='store',
+                        default=30, type=int,
+                        nargs='?',
+                        help='Specify gain [range: 0-1023, default: 30]')
     args = parser.parse_args()
 
     camera = GFCAM_LID
     if args.head:
         camera = GFCAM_HEAD
 
-    Image.frombytes("RGB", (GFCAM_WIDTH, GFCAM_HEIGHT), GFCam(camera).capture()).save(args.filename)
+    with open(args.filename, 'wb') as f:
+        f.write(capture(camera, exposure, gain))
