@@ -124,7 +124,6 @@ class Machine(BaseMachine):
         self._sw_thread.start()
         # Setup machine
         set_lid_led(MACHINE_SETTINGS['LLvl'].default)
-        cnc.set_motor_lock(15)
         TEC.off()
         WaterPump.on()
         WaterPump.set_heater(int(get_cfg('THERMAL.WATER_HEATER_PERCENT')))
@@ -137,7 +136,6 @@ class Machine(BaseMachine):
     def _lid_image(self, msg: dict) -> None:
         logger.info('capturing Lid Image')
         img = cam.capture(cam.GFCAM_LID)
-        # img = open('_RESOURCES/IMG/HOME_2.jpg', 'rb').read()
         logger.info('uploading Lid Image')
         img_upload(self._session, img, msg)
         if get_cfg('LOGGING.SAVE_SENT_IMAGES'):
