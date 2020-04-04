@@ -4,14 +4,12 @@ Scott Wiederhold, s.e.wiederhold@gmail.com
 https://community.openglow.org
 SPDX-License-Identifier:    MIT
 """
-from io import BytesIO
 import logging
 import os
-from PIL import Image
 from time import sleep
 
 from gfutilities import BaseMachine
-from gfutilities.configuration import get_cfg
+from gfutilities.configuration import get_cfg, set_cfg
 from gfutilities.puls import generate_linear_puls
 from gfutilities.service.websocket import load_motion, img_upload, send_wss_event
 from gfutilities.device.settings import MACHINE_SETTINGS, update_settings
@@ -67,6 +65,11 @@ class Machine(BaseMachine):
         self._button_pressed: bool = False
         self._motion_stats: dict = {}
         self._sw_thread: SwitchMonitor = SwitchMonitor(SWITCH_DEVICE, self._switch_event)
+
+        set_cfg('MACHINE.HEAD_FIRMWARE', self.head_info().version, True)
+        set_cfg('MACHINE.HEAD_ID', self.head_info().hardware_id, True)
+        set_cfg('MACHINE.HEAD_SERIAL', self.head_info().hardware_id, True)
+
         BaseMachine.__init__(self)
 
     def _button_wait(self, msg: dict) -> None:
@@ -89,16 +92,22 @@ class Machine(BaseMachine):
 
     def _head_image(self, msg: dict, settings: dict = None) -> None:
         logger.info('capturing Head Image')
-        bio = BytesIO()
         set_head_led_from_pulse(settings['HCil'])
-        cap = Image.frombytes("RGB", (cam.GFCAM_WIDTH, cam.GFCAM_HEIGHT), cam.GFCam(cam.GFCAM_HEAD).capture())
-        cap.save(bio, "JPEG")
+        img = cam.capture(cam.GFCAM_HEAD, int(settings['HCex']), int(settings['HCga']))
         head_all_led_off()
         logger.info('uploading Head Image')
-        img_upload(self._session, bio.getvalue(), msg)
+        img_upload(self._session, img, msg)
         if get_cfg('LOGGING.SAVE_SENT_IMAGES'):
-            logger.info('saving Lid Image')
-            cap.save('%s/%s.jpeg' % (get_cfg('LOGGING.DIR'), msg['id']), 'JPEG')
+            logger.info('saving Head Image')
+            open('%s/%s.jpeg' % (get_cfg('LOGGING.DIR'), msg['id']), 'wb').write(img)
+
+    def head_info(self) -> HeadInfo:
+        (hw_id, serial, version, r5, r6) = read_file(SYSFS_GF_BASE + 'head/info').splitlines()
+        return HeadInfo(
+            int(hw_id.split('=')[1], 16),
+            int(serial.split('=')[1]),
+            int(version.split('=')[1], 16),
+        )
 
     def _hunt(self, msg: dict) -> None:
         ZAxis.home()
@@ -115,6 +124,7 @@ class Machine(BaseMachine):
         self._sw_thread.start()
         # Setup machine
         set_lid_led(MACHINE_SETTINGS['LLvl'].default)
+        cnc.set_motor_lock(15)
         TEC.off()
         WaterPump.on()
         WaterPump.set_heater(int(get_cfg('THERMAL.WATER_HEATER_PERCENT')))
@@ -126,14 +136,13 @@ class Machine(BaseMachine):
 
     def _lid_image(self, msg: dict) -> None:
         logger.info('capturing Lid Image')
-        bio = BytesIO()
-        cap = Image.frombytes("RGB", (cam.GFCAM_WIDTH, cam.GFCAM_HEIGHT), cam.GFCam(cam.GFCAM_LID).capture())
-        cap.save(bio, "JPEG")
+        img = cam.capture(cam.GFCAM_LID)
+        # img = open('_RESOURCES/IMG/HOME_2.jpg', 'rb').read()
         logger.info('uploading Lid Image')
-        img_upload(self._session, bio.getvalue(), msg)
+        img_upload(self._session, img, msg)
         if get_cfg('LOGGING.SAVE_SENT_IMAGES'):
             logger.info('saving Lid Image')
-            cap.save('%s/%s.jpeg' % (get_cfg('LOGGING.DIR'), msg['id']), 'JPEG')
+            open('%s/%s.jpeg' % (get_cfg('LOGGING.DIR'), msg['id']), 'wb').write(img)
 
     def _motion(self, msg: dict) -> None:
         logger.info('start motion')
@@ -160,6 +169,7 @@ class Machine(BaseMachine):
             # Run motion job
             if not self._running_action_cancelled:
                 if msg['action_type'] == 'print':
+                    logger.info('start temps: %s' % str(temp_sensor.all))
                     send_wss_event(self._q_msg_tx, msg['id'], 'print:running')
                 self._run_loop()
                 cnc.laser_latch(1)
@@ -171,6 +181,8 @@ class Machine(BaseMachine):
                 ))
                 logger.info('motion bytes actual:%s, expected: %s' %
                             (pos.bytes.processed, self._motion_stats['size']))
+                if msg['action_type'] == 'print':
+                    logger.info('end print temps: %s' % str(temp_sensor.all))
 
             # Cool down for prints
             if msg['action_type'] == 'print':
@@ -179,6 +191,7 @@ class Machine(BaseMachine):
                 self._config_from_pulse('cool_down', self._motion_stats['header_data'])
                 if get_cfg('MOTION.COOL_DOWN_DELAY'):
                     sleep(int(get_cfg('MOTION.COOL_DOWN_DELAY')))
+                logger.info('end cool-down temps: %s' % str(temp_sensor.all))
 
             # Config for idle
             logger.info('start idle')
@@ -207,6 +220,7 @@ class Machine(BaseMachine):
         logger.info('current state: %s' % cnc.state)
         while cnc.state is MachineState.RUNNING:
             # TODO: Check for conditions that would make us want to stop what we are doing
+            #       Like OVER-TEMP, LID OPEN, ACCELEROMETER TRIP, ETC.
             pass
             sleep(.1)
         logger.info('current state: %s' % cnc.state)
@@ -221,6 +235,9 @@ class Machine(BaseMachine):
             return False
         if cnc.state is not MachineState.IDLE:
             logger.info('machine is not idle, state: %s' % cnc.state.value)
+            return False
+        if temp_sensor.water_2.C > int(get_cfg('THERMAL.MAX_START_TEMP')):
+            logger.info('machine temp is too high, temp: %s' % temp_sensor.water_2.C)
             return False
         return True
 

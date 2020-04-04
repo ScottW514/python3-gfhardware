@@ -19,6 +19,7 @@ Z_STEP_PER_MM = 0.70612
 
 # Named Tuples
 AxisPosition = namedtuple('AxisPosition', ['steps', 'mm', 'inch'])
+HeadInfo = namedtuple('HeadInfo', ['hardware_id', 'serial', 'version'])
 Position = namedtuple('Position', ['x', 'y', 'z', 'bytes'])
 PulsPosition = namedtuple('PulsPosition', ['total', 'processed'])
 SDMA = namedtuple('SDMA', ['pc', 'rpc', 'spc', 'epc', 't', 'sf', 'df', 'lm', 'r0', 'r1', 'r2', 'r3', 'r4', 'r5', 'r6',
@@ -119,5 +120,5 @@ __all__ = [
     # Functions
     'read_file', 'write_attr', 'write_file',
     # Named Tuples
-    'AxisPosition', 'Position', 'PulsPosition', 'SwitchEvent', 'Temperature'
+    'AxisPosition', 'HeadInfo', 'Position', 'PulsPosition', 'SwitchEvent', 'Temperature'
 ]

@@ -140,7 +140,7 @@ class _TempSensor(object):
         self._temp_calc = sensor_def.get('temp_calc') or None
 
     @property
-    def temp(self) -> tuple:
+    def temp(self) -> Temperature:
         raw_t = int(read_file(self._sensor_path))
         if self._temp_calc is None:
             return Temperature(raw_t, -999.9, -999.9)
