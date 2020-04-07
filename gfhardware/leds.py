@@ -42,7 +42,7 @@ def set_head_white_led(val: int) -> None:
 def set_lid_led(level: int) -> None:
     if level < 0 or level > 255:
         raise ValueError('lid_led must be between 0 and 255, level: %s', level)
-    write_attr(SYSFS_GF_BASE + 'pic/lid_led', level)
+    write_attr('/sys/class/leds/lid_led/target', level)
 
 
 __all__ = ['head_all_led_off', 'set_button_color', 'set_head_led_from_pulse', 'set_head_mhs_laser', 'set_head_uv_led',
