@@ -14,9 +14,10 @@ from gfutilities.puls import generate_linear_puls
 from gfutilities.service.websocket import load_motion, img_upload, send_wss_event
 from gfutilities.device.settings import MACHINE_SETTINGS, update_settings
 
+from gfhardware import id
+from gfhardware._common import *
 from gfhardware.cnc import *
 from gfhardware.cooling import *
-from gfhardware._common import *
 from gfhardware.leds import *
 from gfhardware.switches import *
 from gfhardware.z_axis import ZAxis
@@ -69,6 +70,10 @@ class Machine(BaseMachine):
         set_cfg('MACHINE.HEAD_FIRMWARE', self.head_info().version, True)
         set_cfg('MACHINE.HEAD_ID', self.head_info().hardware_id, True)
         set_cfg('MACHINE.HEAD_SERIAL', self.head_info().hardware_id, True)
+
+        set_cfg('MACHINE.SERIAL', id.serial(), True)
+        set_cfg('MACHINE.HOSTNAME', id.hostname(), True)
+        set_cfg('MACHINE.PASSWORD', id.password(), True)
 
         BaseMachine.__init__(self)
 
