@@ -7,7 +7,7 @@ SPDX-License-Identifier:    MIT
 
 if __name__ == '__main__':
     import argparse
-    from gfhardware.cam import capture, GFCAM_WIDTH, GFCAM_HEIGHT, GFCAM_LID, GFCAM_HEAD
+    from gfhardware.cam import capture, GFCAM_LID, GFCAM_HEAD
     parser = argparse.ArgumentParser(description='CaptureThread jpeg image from Glowforge camera.')
     parser.add_argument('--head', action='store_true',
                         help='CaptureThread from head camera [default: lid camera]')
@@ -19,8 +19,6 @@ if __name__ == '__main__':
                         default=3000, type=int,
                         nargs='?',
                         help='Specify exposure [range: 0-65535, default: 3000]')
-    args = parser.parse_args()
-
     parser.add_argument('gain', action='store',
                         default=30, type=int,
                         nargs='?',
@@ -32,4 +30,4 @@ if __name__ == '__main__':
         camera = GFCAM_HEAD
 
     with open(args.filename, 'wb') as f:
-        f.write(capture(camera, exposure, gain))
+        f.write(capture(camera, args.exposure, args.gain))
