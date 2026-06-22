@@ -98,7 +98,10 @@ class Machine(BaseMachine):
     def _head_image(self, msg: dict, settings: dict = None) -> None:
         logger.info('capturing Head Image')
         set_head_led_from_pulse(settings['HCil'])
-        img = cam.capture(cam.GFCAM_HEAD, int(settings['HCex']), int(settings['HCga']))
+        # exposure/gain come from the per-camera defaults in gfhardware.cam; the
+        # cloud's HCex/HCga are factory-scale (1/16-line units differ) and would
+        # under-expose on mainline.
+        img = cam.capture(cam.GFCAM_HEAD)
         head_all_led_off()
         logger.info('uploading Head Image')
         img_upload(self._session, img, msg)
