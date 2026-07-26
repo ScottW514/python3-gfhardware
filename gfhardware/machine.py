@@ -4,6 +4,7 @@ Scott Wiederhold, s.e.wiederhold@gmail.com
 https://community.openglow.org
 SPDX-License-Identifier:    MIT
 """
+import fcntl
 import logging
 import os
 from time import sleep
@@ -97,11 +98,17 @@ class Machine(BaseMachine):
 
     def _head_image(self, msg: dict, settings: dict = None) -> None:
         logger.info('capturing Head Image')
-        set_head_led_from_pulse(settings['HCil'])
+        # settings is None for plain head-image requests (only lidar/hunt
+        # requests carry HCil); unconditional indexing crashed those requests.
+        if settings and settings.get('HCil') is not None:
+            set_head_led_from_pulse(settings['HCil'])
         # exposure/gain come from the per-camera defaults in gfhardware.cam; the
         # cloud's HCex/HCga are factory-scale (1/16-line units differ) and would
         # under-expose on mainline.
-        img = cam.capture(cam.GFCAM_HEAD)
+        # illumination=0: the factory captured ALL head images with the white
+        # torch off - added white light washes out the measure-laser dot and
+        # can break the cloud's focus/hunt analysis (audit M16).
+        img = cam.capture(cam.GFCAM_HEAD, illumination=0)
         head_all_led_off()
         logger.info('uploading Head Image')
         img_upload(self._session, img, msg)
@@ -126,6 +133,14 @@ class Machine(BaseMachine):
             offset_dir = Dir.Pos if home_offset > 0 else Dir.Neg
             while home_offset != 0:
                 ZAxis.step(offset_dir)
+
+    def _action_cleanup(self) -> None:
+        """Post-action failsafe hook (BaseMachine runs it even when an action
+        crashes): lock the laser latch and drop the pulse-device registration.
+        The deadman fd itself is closed by _motion's with-block - when a crash
+        happens mid-run, that close is what fires the kernel dead man's switch."""
+        cnc.laser_latch(1)
+        cnc.set_pulse_dev(None)
 
     def _initialize(self) -> None:
         logger.debug('initializing machine')
@@ -153,63 +168,80 @@ class Machine(BaseMachine):
     def _motion(self, msg: dict) -> None:
         logger.info('start motion')
         if self._safe_to_move:
-            cnc.clear_all()
-            # Download puls file from service
-            logger.info('loading motion file from %s' % msg['motion_url'])
-            self._motion_stats = load_motion(self._session, msg['motion_url'], PULS_DEVICE)
-            logger.info('motion stats: %s' % self._motion_stats)
-            if msg['action_type'] == 'print':
-                send_wss_event(self._q_msg_tx, msg['id'], 'print:download:completed')
-                cnc.laser_latch(0)
-                self._button_wait(msg)
-                if not self._running_action_cancelled:
-                    send_wss_event(self._q_msg_tx, msg['id'], 'print:warmup:starting')
-
-            # Configure for print, and wait for warm up
-            if not self._running_action_cancelled:
-                self._config_from_pulse('run', self._motion_stats['header_data'])
-                if msg['action_type'] == 'print':
-                    if get_cfg('MOTION.WARM_UP_DELAY'):
-                        sleep(int(get_cfg('MOTION.WARM_UP_DELAY')))
-
-            # Run motion job
-            if not self._running_action_cancelled:
-                if msg['action_type'] == 'print':
-                    logger.info('start temps: %s' % str(temp_sensor.all))
-                    send_wss_event(self._q_msg_tx, msg['id'], 'print:running')
-                self._run_loop()
-                cnc.laser_latch(1)
-                pos = cnc.position
-                logger.info('end positions (actual/expected): X (%s/%s), Y (%s/%s), Z (%s/%s)' % (
-                    pos.x.steps, self._motion_stats['stats']['XEND'],
-                    pos.y.steps, self._motion_stats['stats']['YEND'],
-                    pos.z.steps, self._motion_stats['stats']['ZEND'],
-                ))
-                logger.info('motion bytes actual:%s, expected: %s' %
-                            (pos.bytes.processed, self._motion_stats['size']))
-                if msg['action_type'] == 'print':
-                    logger.info('end print temps: %s' % str(temp_sensor.all))
-
-            # Cool down for prints
-            if msg['action_type'] == 'print':
-                self._return_home()
-                logger.info('start cool down')
-                self._config_from_pulse('cool_down', self._motion_stats['header_data'])
-                if get_cfg('MOTION.COOL_DOWN_DELAY'):
-                    sleep(int(get_cfg('MOTION.COOL_DOWN_DELAY')))
-                logger.info('end cool-down temps: %s' % str(temp_sensor.all))
-
-            # Config for idle
-            logger.info('start idle')
-            self._config_from_pulse('idle', self._motion_stats['header_data'])
-            pos = cnc.position
-            logger.info('end positions (%s, %s, %s)' % (pos.x.steps, pos.y.steps, pos.z.steps))
+            # Hold /dev/glowforge open and flock(LOCK_EX)'d for the whole job:
+            # this arms the kernel dead man's switch, which halts motion and
+            # locks the laser if this process dies mid-print (the kernel
+            # triggers on release of a locked fd). The device is exclusive-
+            # open, so every pulse write and seek must route through this one
+            # fd (audit M18); cnc.set_pulse_dev() points the seek helpers at
+            # it, and load_motion/generate_linear_puls accept the open file.
+            with open(PULS_DEVICE, 'wb', buffering=0) as pulse_dev:
+                fcntl.flock(pulse_dev, fcntl.LOCK_EX)
+                cnc.set_pulse_dev(pulse_dev)
+                try:
+                    self._motion_locked(msg, pulse_dev)
+                finally:
+                    cnc.set_pulse_dev(None)
         logger.info('end motion')
 
-    def _return_home(self) -> None:
+    def _motion_locked(self, msg: dict, pulse_dev) -> None:
+        """Body of a motion/print job; runs with the deadman fd held."""
+        cnc.clear_all()
+        # Download puls file from service
+        logger.info('loading motion file from %s' % msg['motion_url'])
+        self._motion_stats = load_motion(self._session, msg['motion_url'], pulse_dev)
+        logger.info('motion stats: %s' % self._motion_stats)
+        if msg['action_type'] == 'print':
+            send_wss_event(self._q_msg_tx, msg['id'], 'print:download:completed')
+            cnc.laser_latch(0)
+            self._button_wait(msg)
+            if not self._running_action_cancelled:
+                send_wss_event(self._q_msg_tx, msg['id'], 'print:warmup:starting')
+
+        # Configure for print, and wait for warm up
+        if not self._running_action_cancelled:
+            self._config_from_pulse('run', self._motion_stats['header_data'])
+            if msg['action_type'] == 'print':
+                if get_cfg('MOTION.WARM_UP_DELAY'):
+                    sleep(int(get_cfg('MOTION.WARM_UP_DELAY')))
+
+        # Run motion job
+        if not self._running_action_cancelled:
+            if msg['action_type'] == 'print':
+                logger.info('start temps: %s' % str(temp_sensor.all))
+                send_wss_event(self._q_msg_tx, msg['id'], 'print:running')
+            self._run_loop()
+            cnc.laser_latch(1)
+            pos = cnc.position
+            logger.info('end positions (actual/expected): X (%s/%s), Y (%s/%s), Z (%s/%s)' % (
+                pos.x.steps, self._motion_stats['stats']['XEND'],
+                pos.y.steps, self._motion_stats['stats']['YEND'],
+                pos.z.steps, self._motion_stats['stats']['ZEND'],
+            ))
+            logger.info('motion bytes actual:%s, expected: %s' %
+                        (pos.bytes.processed, self._motion_stats['size']))
+            if msg['action_type'] == 'print':
+                logger.info('end print temps: %s' % str(temp_sensor.all))
+
+        # Cool down for prints
+        if msg['action_type'] == 'print':
+            self._return_home(pulse_dev)
+            logger.info('start cool down')
+            self._config_from_pulse('cool_down', self._motion_stats['header_data'])
+            if get_cfg('MOTION.COOL_DOWN_DELAY'):
+                sleep(int(get_cfg('MOTION.COOL_DOWN_DELAY')))
+            logger.info('end cool-down temps: %s' % str(temp_sensor.all))
+
+        # Config for idle
+        logger.info('start idle')
+        self._config_from_pulse('idle', self._motion_stats['header_data'])
+        pos = cnc.position
+        logger.info('end positions (%s, %s, %s)' % (pos.x.steps, pos.y.steps, pos.z.steps))
+
+    def _return_home(self, pulse_dev) -> None:
         logger.info('start return home')
         pos = cnc.position
-        generate_linear_puls(pos.x.steps * -1, pos.y.steps * -1, PULS_DEVICE)
+        generate_linear_puls(pos.x.steps * -1, pos.y.steps * -1, pulse_dev)
         self._run_loop()
         send_wss_event(self._q_msg_tx, self.running_action_id, 'print:return_to_home:succeeded')
 
@@ -224,10 +256,27 @@ class Machine(BaseMachine):
             wait_time = wait_time - 1
             sleep(.1)
         logger.info('current state: %s' % cnc.state)
+        # Live safety poll (audit M18): the hardware chain kills the BEAM on
+        # lid/interlock/estop by itself, but MOTION continued at full speed
+        # until now. Switch polarity follows _safe_to_move / _switch_event:
+        # truthy = circuit closed / OK.
+        stop_sent = False
         while cnc.state is MachineState.RUNNING:
-            # TODO: Check for conditions that would make us want to stop what we are doing
-            #       Like OVER-TEMP, LID OPEN, ACCELEROMETER TRIP, ETC.
-            pass
+            if not stop_sent:
+                switches = self._sw_thread.all_switches()
+                if not switches[InputSwitch.SW_ESTOP] or not switches[InputSwitch.SW_INTERLOCK]:
+                    logger.error('estop/interlock tripped mid-run; emergency halt')
+                    cnc.halt()
+                    cnc.disable()
+                    stop_sent = True
+                elif self._running_action_cancelled:
+                    logger.warning('action cancelled mid-run; stopping motion')
+                    cnc.stop()
+                    stop_sent = True
+                elif not switches[InputSwitch.SW_DOORS]:
+                    logger.warning('lid opened mid-run; stopping motion')
+                    cnc.stop()
+                    stop_sent = True
             sleep(.1)
         logger.info('current state: %s' % cnc.state)
         set_button_color(ButtonColor.OFF)
