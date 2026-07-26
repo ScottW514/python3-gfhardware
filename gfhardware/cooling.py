@@ -174,7 +174,9 @@ def _lm75_hwmon_path() -> str:
         for node in sorted(os.listdir(base)):
             try:
                 with open('%s/%s/name' % (base, node)) as f:
-                    if f.read().strip() == 'lm75':
+                    # the driver names the node after the bound chip variant
+                    # ('lm75b' on the factory board)
+                    if f.read().strip().startswith('lm75'):
                         return '%s/%s/temp1_input' % (base, node)
             except OSError:
                 continue
