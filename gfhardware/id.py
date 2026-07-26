@@ -1,14 +1,60 @@
 """
-(C) Copyright 2020
+(C) Copyright 2020-2026
 Scott Wiederhold, s.e.wiederhold@gmail.com
 https://community.openglow.org
 SPDX-License-Identifier:    MIT
+
+Machine identity, derived from the i.MX6 OCOTP fuses.
+
+The factory 4.14 vendor kernel exposed the fuses through the NXP fsl_otp
+driver (/sys/fsl_otp/HW_OCOTP_*); mainline 6.12 exposes the same fuse words
+only through nvmem. Both paths are tried (legacy first, so this module still
+works on a factory kernel), then the values can be overridden / provided by
+/etc/gfhardware-id.conf for machines whose fuses cannot be read.
+
+nvmem layout (imx-ocotp): one 32-bit word per fuse, bank-major, 8 words per
+bank -> byte offset = (bank * 8 + word) * 4.
+  HW_OCOTP_MAC0   = bank 4 word 2 -> word 34, offset 136
+  HW_OCOTP_SRK0-7 = bank 3 words 0-7 -> words 24-31, offset 96
 """
+import configparser
+import os
+import struct
+
 from gfhardware._common import read_file
+
+_NVMEM_PATH = '/sys/bus/nvmem/devices/imx-ocotp0/nvmem'
+_LEGACY_MAC0 = '/sys/fsl_otp/HW_OCOTP_MAC0'
+_LEGACY_SRK = '/sys/fsl_otp/HW_OCOTP_SRK%d'
+_CONF_PATH = '/etc/gfhardware-id.conf'
+
+_MAC0_OFFSET = (4 * 8 + 2) * 4
+_SRK_OFFSET = (3 * 8 + 0) * 4
+
+
+def _nvmem_words(offset: int, count: int) -> list:
+    with open(_NVMEM_PATH, 'rb') as f:
+        f.seek(offset)
+        data = f.read(count * 4)
+    if len(data) != count * 4:
+        raise IOError('short nvmem read at offset %d' % offset)
+    return list(struct.unpack('<%dI' % count, data))
+
+
+def _conf_value(key: str) -> str:
+    cfg = configparser.ConfigParser()
+    if not cfg.read(_CONF_PATH):
+        raise IOError('%s not found' % _CONF_PATH)
+    return cfg['MACHINE'][key]
 
 
 def serial() -> int:
-    return int(read_file('/sys/fsl_otp/HW_OCOTP_MAC0'), 16)
+    if os.path.exists(_LEGACY_MAC0):
+        return int(read_file(_LEGACY_MAC0), 16)
+    try:
+        return _nvmem_words(_MAC0_OFFSET, 1)[0]
+    except (OSError, IOError):
+        return int(_conf_value('serial'), 0)
 
 
 def hostname() -> str:
@@ -22,7 +68,10 @@ def hostname() -> str:
 
 
 def password() -> str:
-    pw = ""
-    for word in range(8):
-        pw += "%08x" % int(read_file('/sys/fsl_otp/HW_OCOTP_SRK%d' % word), 16)
-    return pw
+    if os.path.exists(_LEGACY_SRK % 0):
+        return "".join("%08x" % int(read_file(_LEGACY_SRK % w), 16)
+                       for w in range(8))
+    try:
+        return "".join("%08x" % w for w in _nvmem_words(_SRK_OFFSET, 8))
+    except (OSError, IOError):
+        return _conf_value('password')
