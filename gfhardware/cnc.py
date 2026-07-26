@@ -14,6 +14,17 @@ logger = logging.getLogger(LOGGER_NAME)
 
 
 class _CNC(object):
+    # Externally-held exclusive /dev/glowforge file object (the job-scoped
+    # deadman fd, see machine.py). The device is exclusive-open in the kernel,
+    # so while a job holds it, every seek/write must route through that one
+    # fd instead of opening the device again (which would fail -EBUSY).
+    pulse_dev = None
+
+    @staticmethod
+    def set_pulse_dev(dev):
+        """Register (or clear, with None) the job-held pulse-device file."""
+        _CNC.pulse_dev = dev
+
     @staticmethod
     def clear_all():
         _CNC._dev_seek(0)
@@ -32,8 +43,11 @@ class _CNC(object):
 
     @staticmethod
     def _dev_seek(count):
-        with open(PULS_DEVICE, 'w') as f:
-            os.lseek(f.fileno(), count, os.SEEK_SET)
+        if _CNC.pulse_dev is not None:
+            os.lseek(_CNC.pulse_dev.fileno(), count, os.SEEK_SET)
+        else:
+            with open(PULS_DEVICE, 'w') as f:
+                os.lseek(f.fileno(), count, os.SEEK_SET)
 
     @staticmethod
     def disable():
@@ -63,13 +77,15 @@ class _CNC(object):
     @property
     def position(self) -> Position:
         raw = read_file(SYSFS_GF_BASE + 'cnc/position', True)
+        # Full 4-byte little-endian words; the old 3-byte slices dropped each
+        # MSB and wrapped the counters at 16 MiB (audit N18).
         return Position(
-            _CNC.position_calc(int.from_bytes(raw[0:3], byteorder='little', signed=True), self.x_mode, XY_STEP_PER_MM),
-            _CNC.position_calc(int.from_bytes(raw[4:7], byteorder='little', signed=True), self.y_mode, XY_STEP_PER_MM),
-            _CNC.position_calc(int.from_bytes(raw[8:11], byteorder='little', signed=True), 2, Z_STEP_PER_MM),
+            _CNC.position_calc(int.from_bytes(raw[0:4], byteorder='little', signed=True), self.x_mode, XY_STEP_PER_MM),
+            _CNC.position_calc(int.from_bytes(raw[4:8], byteorder='little', signed=True), self.y_mode, XY_STEP_PER_MM),
+            _CNC.position_calc(int.from_bytes(raw[8:12], byteorder='little', signed=True), 2, Z_STEP_PER_MM),
             PulsPosition(
-                int.from_bytes(raw[16:19], byteorder='little', signed=False),
-                int.from_bytes(raw[12:15], byteorder='little', signed=False)
+                int.from_bytes(raw[16:20], byteorder='little', signed=False),
+                int.from_bytes(raw[12:16], byteorder='little', signed=False)
             )
         )
 
@@ -89,7 +105,7 @@ class _CNC(object):
         _CNC.set_x_decay(1)
         _CNC.set_y_decay(1)
         _CNC.set_x_current(33)
-        _CNC.set_x_current(5)
+        _CNC.set_y_current(33)
 
     @staticmethod
     def resume():

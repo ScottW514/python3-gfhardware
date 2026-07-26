@@ -5,6 +5,7 @@ https://community.openglow.org
 SPDX-License-Identifier:    MIT
 """
 import logging
+import os
 from threading import Thread
 from time import sleep
 
@@ -160,10 +161,33 @@ class _TempSensor(object):
         return (in_value * 0.08715) - 21  # Not perfect, but close
 
 
+def _lm75_hwmon_path() -> str:
+    """Resolve the LM75 chassis sensor's hwmon node by name.
+
+    hwmon numbering depends on probe order: on the 6.12 kernel hwmon0 is the
+    built-in imx_thermal CPU-die zone, while the LM75 (module, binds later)
+    lands elsewhere - a hardcoded hwmon0 silently reported CPU temperature as
+    chassis temperature (audit N19).
+    """
+    base = '/sys/class/hwmon'
+    try:
+        for node in sorted(os.listdir(base)):
+            try:
+                with open('%s/%s/name' % (base, node)) as f:
+                    if f.read().strip() == 'lm75':
+                        return '%s/%s/temp1_input' % (base, node)
+            except OSError:
+                continue
+    except OSError:
+        pass
+    logger.warning('no lm75 hwmon node found; chassis temp unavailable')
+    return '%s/hwmon-lm75-not-found/temp1_input' % base
+
+
 class _Temp(object):
     def __init__(self):
         self._chassis = _TempSensor({
-            'sensor_path': '/sys/class/hwmon/hwmon0/temp1_input',
+            'sensor_path': _lm75_hwmon_path(),
             'temp_calc': _TempSensor.calc_lm75
         })
 
