@@ -259,13 +259,17 @@ class Machine(BaseMachine):
         # Live safety poll (audit M18): the hardware chain kills the BEAM on
         # lid/interlock/estop by itself, but MOTION continued at full speed
         # until now. Switch polarity follows _safe_to_move / _switch_event:
-        # truthy = circuit closed / OK.
+        # truthy = circuit closed / OK (verified live: ESTOP reads True on an
+        # operating machine). SW_INTERLOCK deliberately does NOT gate motion:
+        # it reads False permanently on machines without the rear interlock
+        # plug (verified live), and the hardware chain already disables the
+        # beam whenever it is open.
         stop_sent = False
         while cnc.state is MachineState.RUNNING:
             if not stop_sent:
                 switches = self._sw_thread.all_switches()
-                if not switches[InputSwitch.SW_ESTOP] or not switches[InputSwitch.SW_INTERLOCK]:
-                    logger.error('estop/interlock tripped mid-run; emergency halt')
+                if not switches[InputSwitch.SW_ESTOP]:
+                    logger.error('estop tripped mid-run; emergency halt')
                     cnc.halt()
                     cnc.disable()
                     stop_sent = True
