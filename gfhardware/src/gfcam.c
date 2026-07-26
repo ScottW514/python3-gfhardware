@@ -43,7 +43,10 @@ static int _ioctl(int fd, int request, void *arg) {
     if(!result)
       return 0;
     if(errno != EINTR) {
-      return errno;
+      /* -1 with errno set: a positive errno return made every `< 0` check
+       * at the call sites dead (failures sailed through and later stages
+       * read wrong-size or stale buffers - audit M14). */
+      return -1;
     }
   }
 }
@@ -58,6 +61,18 @@ static PyObject *method_grab(PyObject *self, PyObject *args) {
     return NULL;
   }
 
+  // All error paths must release everything acquired so far: a leaked fd
+  // keeps vb2 queue ownership, so the NEXT grab's REQBUFS fails -EBUSY and
+  // one transient failure (e.g. an EOF timeout) permanently wedged capture
+  // in a long-running process (audit M15).
+  struct buffer *buffers = NULL;
+  unsigned char *rgb_map = MAP_FAILED;
+  uint32_t rgb_size = 0;
+  int n_buffers = 0;
+  int streaming = 0;
+  struct v4l2_buffer buf;
+  enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
   // Open device
   int dev_fd = open(dev_path, O_RDWR | O_NONBLOCK, 0);
   if (dev_fd == -1)
@@ -65,12 +80,18 @@ static PyObject *method_grab(PyObject *self, PyObject *args) {
 
   // Validate capabilities
   struct v4l2_capability cap;
-  if (_ioctl(dev_fd, VIDIOC_QUERYCAP, &cap) < 0)
-    return PyErr_Format(PyExc_IOError, "VIDIOC_QUERYCAP failed");
-  if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE))
-    return PyErr_Format(PyExc_IOError, "%s is not a capture device", dev_path);
-  if (!(cap.capabilities & V4L2_CAP_STREAMING))
-    return PyErr_Format(PyExc_IOError, "%s is not a streaming device", dev_path);
+  if (_ioctl(dev_fd, VIDIOC_QUERYCAP, &cap) < 0) {
+    PyErr_Format(PyExc_IOError, "VIDIOC_QUERYCAP failed");
+    goto fail;
+  }
+  if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
+    PyErr_Format(PyExc_IOError, "%s is not a capture device", dev_path);
+    goto fail;
+  }
+  if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
+    PyErr_Format(PyExc_IOError, "%s is not a streaming device", dev_path);
+    goto fail;
+  }
 
   // Set capture format. The imx-media pipeline has already been configured for
   // SBGGR8 at this geometry by gfhardware/cam.py; this just matches the node.
@@ -81,8 +102,10 @@ static PyObject *method_grab(PyObject *self, PyObject *args) {
   fmt.fmt.pix.height = height;
   fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_SBGGR8;
   fmt.fmt.pix.field = V4L2_FIELD_NONE;
-  if (_ioctl(dev_fd, VIDIOC_S_FMT, &fmt) < 0)
-    return PyErr_Format(PyExc_IOError, "VIDIOC_S_FMT failed");
+  if (_ioctl(dev_fd, VIDIOC_S_FMT, &fmt) < 0) {
+    PyErr_Format(PyExc_IOError, "VIDIOC_S_FMT failed");
+    goto fail;
+  }
 
   // Request and map buffers
   struct v4l2_requestbuffers req;
@@ -90,31 +113,40 @@ static PyObject *method_grab(PyObject *self, PyObject *args) {
   req.count = 2;
   req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   req.memory = V4L2_MEMORY_MMAP;
-  if (_ioctl(dev_fd, VIDIOC_REQBUFS, &req) < 0)
-    return PyErr_Format(PyExc_IOError, "VIDIOC_REQBUFS failed");
-  if (req.count < 2)
-    return PyErr_Format(PyExc_IOError, "Insufficient buffers");
+  if (_ioctl(dev_fd, VIDIOC_REQBUFS, &req) < 0) {
+    PyErr_Format(PyExc_IOError, "VIDIOC_REQBUFS failed");
+    goto fail;
+  }
+  if (req.count < 2) {
+    PyErr_Format(PyExc_IOError, "Insufficient buffers");
+    goto fail;
+  }
 
-  struct buffer *buffers = calloc(req.count, sizeof(*buffers));
-  if (!buffers)
-    return PyErr_Format(PyExc_MemoryError, "failed to allocate buffers");
+  buffers = calloc(req.count, sizeof(*buffers));
+  if (!buffers) {
+    PyErr_Format(PyExc_MemoryError, "failed to allocate buffers");
+    goto fail;
+  }
 
-  struct v4l2_buffer buf;
-  int n_buffers;
   for (n_buffers = 0; n_buffers < (int)req.count; ++n_buffers) {
     CLEAR(buf);
     buf.type        = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     buf.memory      = V4L2_MEMORY_MMAP;
     buf.index       = n_buffers;
-    if (_ioctl(dev_fd, VIDIOC_QUERYBUF, &buf) < 0)
-      return PyErr_Format(PyExc_IOError, "VIDIOC_QUERYBUF failed");
+    if (_ioctl(dev_fd, VIDIOC_QUERYBUF, &buf) < 0) {
+      PyErr_Format(PyExc_IOError, "VIDIOC_QUERYBUF failed");
+      goto fail;
+    }
 
     buffers[n_buffers].length = buf.length;
     buffers[n_buffers].start = mmap(NULL, buf.length,
               PROT_READ | PROT_WRITE, MAP_SHARED, dev_fd, buf.m.offset);
 
-    if (MAP_FAILED == buffers[n_buffers].start)
-      return PyErr_Format(PyExc_IOError, "mmap failed");
+    if (MAP_FAILED == buffers[n_buffers].start) {
+      buffers[n_buffers].start = NULL;
+      PyErr_Format(PyExc_IOError, "mmap failed");
+      goto fail;
+    }
   }
 
   // Queue buffers
@@ -124,14 +156,18 @@ static PyObject *method_grab(PyObject *self, PyObject *args) {
     buf.memory = V4L2_MEMORY_MMAP;
     buf.index = i;
 
-    if (_ioctl(dev_fd, VIDIOC_QBUF, &buf) < 0)
-      return PyErr_Format(PyExc_IOError, "VIDIOC_QBUF failed");
+    if (_ioctl(dev_fd, VIDIOC_QBUF, &buf) < 0) {
+      PyErr_Format(PyExc_IOError, "VIDIOC_QBUF failed");
+      goto fail;
+    }
   }
 
   // Stream on
-  enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  if (_ioctl(dev_fd, VIDIOC_STREAMON, &type) < 0)
-    return PyErr_Format(PyExc_IOError, "VIDIOC_STREAMON failed");
+  if (_ioctl(dev_fd, VIDIOC_STREAMON, &type) < 0) {
+    PyErr_Format(PyExc_IOError, "VIDIOC_STREAMON failed");
+    goto fail;
+  }
+  streaming = 1;
 
   // Wait for and dequeue a frame
   for (;;) {
@@ -150,11 +186,14 @@ static PyObject *method_grab(PyObject *self, PyObject *args) {
     if (ret == -1) {
       if (EINTR == errno)
         continue;
-      return PyErr_Format(PyExc_IOError, "select failed");
+      PyErr_Format(PyExc_IOError, "select failed");
+      goto fail;
     }
 
-    if (ret == 0)
-      return PyErr_Format(PyExc_IOError, "select timeout");
+    if (ret == 0) {
+      PyErr_Format(PyExc_IOError, "select timeout");
+      goto fail;
+    }
 
     CLEAR(buf);
     buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -163,37 +202,37 @@ static PyObject *method_grab(PyObject *self, PyObject *args) {
     if (_ioctl(dev_fd, VIDIOC_DQBUF, &buf) < 0) {
       if ((errno == EAGAIN) || (errno == EIO))
         continue;
-      else
-        return PyErr_Format(PyExc_IOError, "VIDIOC_DQBUF failed");
+      PyErr_Format(PyExc_IOError, "VIDIOC_DQBUF failed");
+      goto fail;
     } else
       break;
   }
 
   // Convert Bayer to RGB
-  uint32_t rgb_size = (uint32_t)width * (uint32_t)height * 3;
-  unsigned char *rgb_map = mmap(NULL, rgb_size, PROT_READ | PROT_WRITE,
+  rgb_size = (uint32_t)width * (uint32_t)height * 3;
+  rgb_map = mmap(NULL, rgb_size, PROT_READ | PROT_WRITE,
         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-  if(rgb_map == MAP_FAILED) {
-    return PyErr_Format(PyExc_MemoryError, "rgb_map mmap failed");
+  if (rgb_map == MAP_FAILED) {
+    PyErr_Format(PyExc_MemoryError, "rgb_map mmap failed");
+    goto fail;
   }
   dc1394_bayer_decoding_8bit(
     (const uint8_t*)buffers[buf.index].start,
     (uint8_t*)rgb_map, width, height,
     DC1394_COLOR_FILTER_BGGR, DC1394_BAYER_METHOD_BILINEAR);
 
-  // Stop stream
-  type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  if (_ioctl(dev_fd, VIDIOC_STREAMOFF, &type) < 0)
-    return PyErr_Format(PyExc_IOError, "VIDIOC_STREAMOFF failed");
-
-  // Release capture buffers
+  // Stop stream and release capture resources (shared with the error path).
   Py_BEGIN_ALLOW_THREADS
-  for(int i = 0; i < n_buffers; i++) {
-    munmap(buffers[i].start, buffers[i].length);
+  _ioctl(dev_fd, VIDIOC_STREAMOFF, &type);
+  for (int i = 0; i < n_buffers; i++) {
+    if (buffers[i].start)
+      munmap(buffers[i].start, buffers[i].length);
   }
   free(buffers);
   close(dev_fd);
   Py_END_ALLOW_THREADS
+  buffers = NULL;
+  dev_fd = -1;
 
   // JPEG encode. The ov5648 HFLIP register breaks imx-media CSI capture (frames
   // never complete -> EOF timeout), so the factory's mirrored image orientation
@@ -253,6 +292,23 @@ static PyObject *method_grab(PyObject *self, PyObject *args) {
   Py_END_ALLOW_THREADS
 
   return result;
+
+fail:
+  // Unified failure cleanup; the Python exception is already set.
+  if (streaming)
+    _ioctl(dev_fd, VIDIOC_STREAMOFF, &type);
+  if (buffers) {
+    for (int i = 0; i < n_buffers; i++) {
+      if (buffers[i].start)
+        munmap(buffers[i].start, buffers[i].length);
+    }
+    free(buffers);
+  }
+  if (rgb_map != MAP_FAILED)
+    munmap(rgb_map, rgb_size);
+  if (dev_fd >= 0)
+    close(dev_fd);
+  return NULL;
 }
 
 static PyMethodDef module_methods[] = {

@@ -18,8 +18,8 @@ white_led instead.
 This module configures that pipeline (via media-ctl / v4l2-ctl) and the lighting
 (via gfhardware.leds), then hands the streaming capture node to the _cam C
 extension which grabs one frame, debayers it, and JPEG-encodes it. Both cameras
-share one video-mux -> MIPI CSI-2 -> IPU CSI path to /dev/video4; only the mux
-input and the illumination LED differ.
+share one video-mux -> MIPI CSI-2 -> IPU CSI path to the 'ipu1_csi0 capture'
+video node; only the mux input and the illumination LED differ.
 """
 import logging
 import re
@@ -39,10 +39,13 @@ GFCAM_HEAD = 1
 GFCAM_WIDTH = 2592
 GFCAM_HEIGHT = 1944
 
-# imx-media capture node (ipu1_csi0) and the media-bus format carried on every
-# pad of the active path. 'field:none' is mandatory: without it link validation
-# rejects STREAMON with -EPIPE.
-_CAPTURE_DEVICE = '/dev/video4'
+# imx-media capture entity (ipu1_csi0) and the media-bus format carried on
+# every pad of the active path. 'field:none' is mandatory: without it link
+# validation rejects STREAMON with -EPIPE. The /dev/videoN node is resolved
+# from the entity name at capture time: imx-media registers several video
+# nodes from modules, so the number depends on probe order (a hardcoded
+# /dev/video4 broke whenever it shifted - audit N21).
+_CAPTURE_ENTITY = 'ipu1_csi0 capture'
 _MBUS_FMT = 'SBGGR8_1X8/%dx%d field:none' % (GFCAM_WIDTH, GFCAM_HEIGHT)
 
 # Brief settle after switching the illumination LED on. The lamp is driven via
@@ -88,6 +91,11 @@ def _media_ctl(*args: str) -> str:
 def _v4l2_ctl(*args: str) -> None:
     subprocess.run(['v4l2-ctl', *args], check=True,
                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def _capture_device() -> str:
+    """Resolve the capture entity's /dev/videoN node at runtime."""
+    return _media_ctl('-e', _CAPTURE_ENTITY)
 
 
 def _sensor_entity(bus: int, required: bool = True):
@@ -207,7 +215,7 @@ def capture(cam_sel: int = GFCAM_LID, exposure: int = None, gain: int = None,
     write_attr(lamp, illumination)
     try:
         time.sleep(_SETTLE_S)
-        return grab(_CAPTURE_DEVICE, GFCAM_WIDTH, GFCAM_HEIGHT, _HFLIP)
+        return grab(_capture_device(), GFCAM_WIDTH, GFCAM_HEIGHT, _HFLIP)
     finally:
         write_attr(lamp, previous if previous is not None else 0)
 
