@@ -77,8 +77,8 @@ class _CNC(object):
     @property
     def position(self) -> Position:
         raw = read_file(SYSFS_GF_BASE + 'cnc/position', True)
-        # Full 4-byte little-endian words; the old 3-byte slices dropped each
-        # MSB and wrapped the counters at 16 MiB (audit N18).
+        # Full 4-byte little-endian words; 3-byte slices would drop each MSB
+        # and wrap the counters at 16 MiB.
         return Position(
             _CNC.position_calc(int.from_bytes(raw[0:4], byteorder='little', signed=True), self.x_mode, XY_STEP_PER_MM),
             _CNC.position_calc(int.from_bytes(raw[4:8], byteorder='little', signed=True), self.y_mode, XY_STEP_PER_MM),

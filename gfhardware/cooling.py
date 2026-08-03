@@ -166,8 +166,8 @@ def _lm75_hwmon_path() -> str:
 
     hwmon numbering depends on probe order: on the 6.12 kernel hwmon0 is the
     built-in imx_thermal CPU-die zone, while the LM75 (module, binds later)
-    lands elsewhere - a hardcoded hwmon0 silently reported CPU temperature as
-    chassis temperature (audit N19).
+    lands elsewhere - a hardcoded hwmon0 would silently report CPU temperature
+    as chassis temperature.
     """
     base = '/sys/class/hwmon'
     try:

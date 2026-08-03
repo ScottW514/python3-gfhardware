@@ -43,9 +43,9 @@ static int _ioctl(int fd, int request, void *arg) {
     if(!result)
       return 0;
     if(errno != EINTR) {
-      /* -1 with errno set: a positive errno return made every `< 0` check
-       * at the call sites dead (failures sailed through and later stages
-       * read wrong-size or stale buffers - audit M14). */
+      /* -1 with errno set: the call sites check `< 0`, so a positive errno
+       * return would leave failures undetected and later stages reading
+       * wrong-size or stale buffers. */
       return -1;
     }
   }
@@ -63,8 +63,8 @@ static PyObject *method_grab(PyObject *self, PyObject *args) {
 
   // All error paths must release everything acquired so far: a leaked fd
   // keeps vb2 queue ownership, so the NEXT grab's REQBUFS fails -EBUSY and
-  // one transient failure (e.g. an EOF timeout) permanently wedged capture
-  // in a long-running process (audit M15).
+  // one transient failure (e.g. an EOF timeout) permanently wedges capture
+  // in a long-running process.
   struct buffer *buffers = NULL;
   unsigned char *rgb_map = MAP_FAILED;
   uint32_t rgb_size = 0;

@@ -43,8 +43,8 @@ GFCAM_HEIGHT = 1944
 # every pad of the active path. 'field:none' is mandatory: without it link
 # validation rejects STREAMON with -EPIPE. The /dev/videoN node is resolved
 # from the entity name at capture time: imx-media registers several video
-# nodes from modules, so the number depends on probe order (a hardcoded
-# /dev/video4 broke whenever it shifted - audit N21).
+# nodes from modules, so the number depends on probe order and a hardcoded
+# /dev/videoN breaks whenever it shifts.
 _CAPTURE_ENTITY = 'ipu1_csi0 capture'
 _MBUS_FMT = 'SBGGR8_1X8/%dx%d field:none' % (GFCAM_WIDTH, GFCAM_HEIGHT)
 

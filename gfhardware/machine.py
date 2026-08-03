@@ -107,7 +107,7 @@ class Machine(BaseMachine):
         # under-expose on mainline.
         # illumination=0: the factory captured ALL head images with the white
         # torch off - added white light washes out the measure-laser dot and
-        # can break the cloud's focus/hunt analysis (audit M16).
+        # can break the cloud's focus/hunt analysis.
         img = cam.capture(cam.GFCAM_HEAD, illumination=0)
         head_all_led_off()
         logger.info('uploading Head Image')
@@ -173,7 +173,7 @@ class Machine(BaseMachine):
             # locks the laser if this process dies mid-print (the kernel
             # triggers on release of a locked fd). The device is exclusive-
             # open, so every pulse write and seek must route through this one
-            # fd (audit M18); cnc.set_pulse_dev() points the seek helpers at
+            # fd; cnc.set_pulse_dev() points the seek helpers at
             # it, and load_motion/generate_linear_puls accept the open file.
             with open(PULS_DEVICE, 'wb', buffering=0) as pulse_dev:
                 fcntl.flock(pulse_dev, fcntl.LOCK_EX)
@@ -256,7 +256,7 @@ class Machine(BaseMachine):
             wait_time = wait_time - 1
             sleep(.1)
         logger.info('current state: %s' % cnc.state)
-        # Live safety poll (audit M18): the hardware chain kills the BEAM on
+        # Live safety poll: the hardware chain kills the BEAM on
         # lid/interlock/estop by itself, but MOTION continued at full speed
         # until now. Switch polarity follows _safe_to_move / _switch_event:
         # truthy = circuit closed / OK (verified live: ESTOP reads True on an
