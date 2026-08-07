@@ -67,6 +67,12 @@ class Machine(BaseMachine):
         self._button_pressed: bool = False
         self._motion_stats: dict = {}
         self._sw_thread: SwitchMonitor = SwitchMonitor(SWITCH_DEVICE, self._switch_event)
+        # The factory board's estop sense line reads LOW whenever the
+        # steppers run (measured on live hardware: it drops for the whole
+        # duration of any X or Z move and recovers at idle), so it cannot
+        # gate motion there. Machines with a real e-stop circuit opt in
+        # via MOTION.ESTOP_HALTS_MOTION.
+        self._estop_halts_motion: bool = bool(get_cfg('MOTION.ESTOP_HALTS_MOTION'))
 
         set_cfg('MACHINE.HEAD_FIRMWARE', self.head_info().version, True)
         set_cfg('MACHINE.HEAD_ID', self.head_info().hardware_id, True)
@@ -259,16 +265,18 @@ class Machine(BaseMachine):
         # Live safety poll: the hardware chain kills the BEAM on
         # lid/interlock/estop by itself, but MOTION continued at full speed
         # until now. Switch polarity follows _safe_to_move / _switch_event:
-        # truthy = circuit closed / OK (verified live: ESTOP reads True on an
-        # operating machine). SW_INTERLOCK deliberately does NOT gate motion:
-        # it reads False permanently on machines without the rear interlock
-        # plug (verified live), and the hardware chain already disables the
-        # beam whenever it is open.
+        # truthy = circuit closed / OK. SW_INTERLOCK deliberately does NOT
+        # gate motion: it reads False permanently on machines without the
+        # rear interlock plug (verified live), and the hardware chain
+        # already disables the beam whenever it is open. SW_ESTOP gates
+        # motion only when MOTION.ESTOP_HALTS_MOTION is set - the factory
+        # board's estop sense reads False during any motion (measured), so
+        # it is idle-telemetry only there.
         stop_sent = False
         while cnc.state is MachineState.RUNNING:
             if not stop_sent:
                 switches = self._sw_thread.all_switches()
-                if not switches[InputSwitch.SW_ESTOP]:
+                if self._estop_halts_motion and not switches[InputSwitch.SW_ESTOP]:
                     logger.error('estop tripped mid-run; emergency halt')
                     cnc.halt()
                     cnc.disable()

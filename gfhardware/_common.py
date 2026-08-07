@@ -71,7 +71,8 @@ class MachineState(Enum):
     IDLE = "Idle",
     RUNNING = "Running",
     DISABLED = "Disabled",
-    FAULT = "Fault"
+    FAULT = "Fault",
+    UNDERRUN = "Underrun"
 
 
 class Microstep(Enum):

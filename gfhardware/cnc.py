@@ -57,6 +57,12 @@ class _CNC(object):
     def enable():
         _CNC._command('enable')
 
+    @staticmethod
+    def halt():
+        """Immediate stop, no deceleration (emergency use only - steps may
+        be skipped at speed, so the position can no longer be trusted)."""
+        _CNC._command('halt')
+
     @property
     def faults(self) -> str:
         return read_file(SYSFS_GF_BASE + 'cnc/faults')
@@ -219,6 +225,8 @@ class _CNC(object):
             return MachineState.RUNNING
         elif state == 'fault':
             return MachineState.FAULT
+        elif state == 'underrun':
+            return MachineState.UNDERRUN
         else:
             raise ValueError('Received invalid state: {}'.format(state))
 
