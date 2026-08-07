@@ -127,11 +127,11 @@ class Machine(BaseMachine):
     def _hunt(self, msg: dict) -> None:
         ZAxis.home()
         self._motion(msg)
-        home_offset = int(get_cfg('MOTION.Z_HOME_OFFSET'))
-        if home_offset is not None:
+        home_offset = int(get_cfg('MOTION.Z_HOME_OFFSET') or 0)
+        if home_offset != 0:
             logger.debug('moving z to home offset %s half steps' % home_offset)
             offset_dir = Dir.Pos if home_offset > 0 else Dir.Neg
-            while home_offset != 0:
+            for _ in range(abs(home_offset)):
                 ZAxis.step(offset_dir)
 
     def _action_cleanup(self) -> None:
