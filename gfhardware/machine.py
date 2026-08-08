@@ -266,12 +266,14 @@ class Machine(BaseMachine):
         # lid/interlock/estop by itself, but MOTION continued at full speed
         # until now. Switch polarity follows _safe_to_move / _switch_event:
         # truthy = circuit closed / OK. SW_INTERLOCK deliberately does NOT
-        # gate motion: it reads False permanently on machines without the
-        # rear interlock plug (verified live), and the hardware chain
-        # already disables the beam whenever it is open. SW_ESTOP gates
-        # motion only when MOTION.ESTOP_HALTS_MOTION is set - the factory
-        # board's estop sense reads False during any motion (measured), so
-        # it is idle-telemetry only there.
+        # gate motion: its sense is inverted - the remote-interlock loop
+        # reads active only when OPEN (Basic/Plus ship the 2-pin connector
+        # factory-jumpered, so it reads inactive = satisfied there) - and
+        # the hardware chain already disables the beam whenever the loop
+        # is open. SW_ESTOP gates motion only when
+        # MOTION.ESTOP_HALTS_MOTION is set - the factory board's estop
+        # sense reads False during any motion (measured), so it is
+        # idle-telemetry only there.
         stop_sent = False
         while cnc.state is MachineState.RUNNING:
             if not stop_sent:
