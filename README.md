@@ -5,4 +5,6 @@ built on these modules: `gfhome.py` (one-shot service-driven homing),
 `gfcloud.py` (full cloud-mode controller daemon, with init script), and
 `ffmachine.py` (the shared hardware-machine glue both use). They are not part
 of the `gfhardware` Python package; the ForgeFIRM image recipes install them
-directly from this directory.
+directly from this directory. `forgefirm-app/docs/CLOUD.md` documents cloud
+mode: the service protocol as implemented, policies, configuration, and
+outstanding items.
