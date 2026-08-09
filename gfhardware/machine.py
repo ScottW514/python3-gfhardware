@@ -245,13 +245,18 @@ class Machine(BaseMachine):
         logger.info('end positions (%s, %s, %s)' % (pos.x.steps, pos.y.steps, pos.z.steps))
 
     def _return_home(self, pulse_dev) -> None:
+        # The park move is the response to an abort, so it must run even when
+        # the action is cancelled (park=True); the service dead-reckons from
+        # this move, so success is only reported when the park completed.
         logger.info('start return home')
         pos = cnc.position
         generate_linear_puls(pos.x.steps * -1, pos.y.steps * -1, pulse_dev)
-        self._run_loop()
+        if self._run_loop(park=True):
+            logger.warning('return home interrupted; not reporting success')
+            return
         send_wss_event(self._q_msg_tx, self.running_action_id, 'print:return_to_home:succeeded')
 
-    def _run_loop(self):
+    def _run_loop(self, park: bool = False) -> bool:
         logger.info('starting run')
         logger.info('current state: %s' % cnc.state)
         set_button_color(ButtonColor.WHITE)
@@ -278,23 +283,29 @@ class Machine(BaseMachine):
         while cnc.state is MachineState.RUNNING:
             if not stop_sent:
                 switches = self._sw_thread.all_switches()
+                # A locally-aborted run must not report ':completed' to the
+                # service: marking the action cancelled routes the finish
+                # through the ':cancelled' event.
                 if self._estop_halts_motion and not switches[InputSwitch.SW_ESTOP]:
                     logger.error('estop tripped mid-run; emergency halt')
+                    self._running_action_cancelled = True
                     cnc.halt()
                     cnc.disable()
                     stop_sent = True
-                elif self._running_action_cancelled:
+                elif self._running_action_cancelled and not park:
                     logger.warning('action cancelled mid-run; stopping motion')
                     cnc.stop()
                     stop_sent = True
                 elif not switches[InputSwitch.SW_DOORS]:
                     logger.warning('lid opened mid-run; stopping motion')
+                    self._running_action_cancelled = True
                     cnc.stop()
                     stop_sent = True
             sleep(.1)
         logger.info('current state: %s' % cnc.state)
         set_button_color(ButtonColor.OFF)
         logger.info('finished run')
+        return stop_sent
 
     @property
     def _safe_to_move(self) -> bool:
