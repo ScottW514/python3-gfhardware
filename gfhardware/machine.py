@@ -319,9 +319,15 @@ class Machine(BaseMachine):
                     # The cooling engine's verdict (flow fault, over-temp,
                     # or an absent engine) pulls the job: latch the laser
                     # and stop.
+                    verdict = cooling_svc.verdict()
                     logger.error('cooling verdict pulled fire mid-run: %s',
-                                 cooling_svc.verdict())
+                                 verdict)
                     cnc.laser_latch(1)
+                    if verdict is None:
+                        # Engine absent: if it died mid flow-check the
+                        # heater is still on - a write nobody else will
+                        # make now.
+                        WaterPump.heater_off()
                     self._running_action_cancelled = True
                     cnc.stop()
                     stop_sent = True
