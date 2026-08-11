@@ -19,6 +19,7 @@ from gfhardware import id
 from gfhardware._common import *
 from gfhardware.cnc import *
 from gfhardware.cooling import *
+from gfhardware.coolsvc import cooling_svc
 from gfhardware.leds import *
 from gfhardware.switches import *
 from gfhardware.z_axis import ZAxis
@@ -42,16 +43,15 @@ class Machine(BaseMachine):
     """
 
     def __init__(self):
+        # The thermal hardware (fans, pump, TEC, heater) is owned by the
+        # forgectrl cooling engine; the pulse header's RUN fan duties go
+        # to it as the per-job profile in the /cool/state reports. The
+        # idle/cool-down duty keys are not mapped - those profiles are
+        # the engine's.
         update_settings({
-            'AAid': {'idle': fans.air_assist.set_pwm},
-            'AArd': {'run': fans.air_assist.set_pwm},
-            'AAwd': {'cool_down': fans.air_assist.set_pwm},
-            'EFid': {'idle': fans.exhaust.set_pwm},
-            'EFrd': {'run': fans.exhaust.set_pwm},
-            'EFwd': {'cool_down': fans.exhaust.set_pwm},
-            'IFid': {'idle': fans.intake_1.set_pwm},
-            'IFrd': {'run': fans.intake_1.set_pwm},
-            'IFwd': {'cool_down': fans.intake_1.set_pwm},
+            'AArd': {'run': cooling_svc.profile_air_assist},
+            'EFrd': {'run': cooling_svc.profile_exhaust},
+            'IFrd': {'run': cooling_svc.profile_intake},
             'STfr': {'run': cnc.set_step_freq},
             'XSdm': {'run': cnc.set_x_decay},
             "XShc": {'idle': cnc.set_x_current},
@@ -147,16 +147,17 @@ class Machine(BaseMachine):
         happens mid-run, that close is what fires the kernel dead man's switch."""
         cnc.laser_latch(1)
         cnc.set_pulse_dev(None)
+        cooling_svc.set_armed(False)
+        cooling_svc.set_mode('idle')
 
     def _initialize(self) -> None:
         logger.debug('initializing machine')
         self._sw_thread.start()
-        # Setup machine
+        # Setup machine. The thermal posture (pump, TEC, heater, fans)
+        # belongs to the forgectrl cooling engine; this client only
+        # starts reporting job state to it.
+        cooling_svc.start()
         set_lid_led(MACHINE_SETTINGS['LLvl'].default)
-        TEC.off()
-        WaterPump.on()
-        WaterPump.set_heater(int(get_cfg('THERMAL.WATER_HEATER_PERCENT')))
-        fans.reset()
         cnc.reset()
         ZAxis.reset()
         set_button_color(ButtonColor.OFF)
@@ -199,14 +200,23 @@ class Machine(BaseMachine):
         logger.info('motion stats: %s' % self._motion_stats)
         if msg['action_type'] == 'print':
             send_wss_event(self._q_msg_tx, msg['id'], 'print:download:completed')
-            cnc.laser_latch(0)
-            self._button_wait(msg)
+            # The cooling engine's verdict gates the armed window: a
+            # flow fault, over-temp, or an absent engine blocks firing.
+            if not cooling_svc.fire_ok():
+                logger.error('cooling verdict blocks firing: %s',
+                             cooling_svc.verdict())
+                self._running_action_cancelled = True
+            else:
+                cnc.laser_latch(0)
+                cooling_svc.set_armed(True)
+                self._button_wait(msg)
             if not self._running_action_cancelled:
                 send_wss_event(self._q_msg_tx, msg['id'], 'print:warmup:starting')
 
         # Configure for print, and wait for warm up
         if not self._running_action_cancelled:
             self._config_from_pulse('run', self._motion_stats['header_data'])
+            cooling_svc.set_mode('run')
             if msg['action_type'] == 'print':
                 if get_cfg('MOTION.WARM_UP_DELAY'):
                     sleep(int(get_cfg('MOTION.WARM_UP_DELAY')))
@@ -218,6 +228,7 @@ class Machine(BaseMachine):
                 send_wss_event(self._q_msg_tx, msg['id'], 'print:running')
             self._run_loop()
             cnc.laser_latch(1)
+            cooling_svc.set_armed(False)
             pos = cnc.position
             logger.info('end positions (actual/expected): X (%s/%s), Y (%s/%s), Z (%s/%s)' % (
                 pos.x.steps, self._motion_stats['stats']['XEND'],
@@ -234,6 +245,7 @@ class Machine(BaseMachine):
             self._return_home(pulse_dev)
             logger.info('start cool down')
             self._config_from_pulse('cool_down', self._motion_stats['header_data'])
+            cooling_svc.set_mode('cooldown')
             if get_cfg('MOTION.COOL_DOWN_DELAY'):
                 sleep(int(get_cfg('MOTION.COOL_DOWN_DELAY')))
             logger.info('end cool-down temps: %s' % str(temp_sensor.all))
@@ -241,6 +253,8 @@ class Machine(BaseMachine):
         # Config for idle
         logger.info('start idle')
         self._config_from_pulse('idle', self._motion_stats['header_data'])
+        cooling_svc.set_mode('idle')
+        cooling_svc.clear_profile()
         pos = cnc.position
         logger.info('end positions (%s, %s, %s)' % (pos.x.steps, pos.y.steps, pos.z.steps))
 
@@ -301,6 +315,16 @@ class Machine(BaseMachine):
                     self._running_action_cancelled = True
                     cnc.stop()
                     stop_sent = True
+                elif cooling_svc.armed and not cooling_svc.fire_ok():
+                    # The cooling engine's verdict (flow fault, over-temp,
+                    # or an absent engine) pulls the job: latch the laser
+                    # and stop.
+                    logger.error('cooling verdict pulled fire mid-run: %s',
+                                 cooling_svc.verdict())
+                    cnc.laser_latch(1)
+                    self._running_action_cancelled = True
+                    cnc.stop()
+                    stop_sent = True
             sleep(.1)
         logger.info('current state: %s' % cnc.state)
         set_button_color(ButtonColor.OFF)
@@ -323,6 +347,7 @@ class Machine(BaseMachine):
 
     def _shutdown(self) -> None:
         logger.info('shutting down')
+        cooling_svc.stop = True
         self._sw_thread.stop = True
         logger.info('joining switch thread')
         self._sw_thread.join()

@@ -24,9 +24,8 @@ level: INFO
 save_sent_images: False
 
 [THERMAL]
-# The heater stays off during homing; thermal policy belongs to the
-# motion controller.
-water_heater_percent: 0
+# Thermal policy (fans, pump, TEC, heater) belongs to the forgectrl
+# cooling engine; only the start-gate ceiling lives here.
 # Real-temperature ceiling; the coolant conversion reads true degrees C.
 max_start_temp: 27
 

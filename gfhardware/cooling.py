@@ -7,40 +7,10 @@ SPDX-License-Identifier:    MIT
 import logging
 import os
 from math import exp, log
-from threading import Thread
-from time import sleep
 
 from gfhardware._common import *
 
 logger = logging.getLogger(LOGGER_NAME)
-
-
-class CoolingMonitor(Thread):
-    def __init__(self):
-        self.stop = False
-        self.sensor = dict.fromkeys(TEMP_SENSORS)
-        for sensor in self.sensor.keys():
-            self.sensor[sensor] = Temperature(None, None, None)
-        Thread.__init__(self)
-
-    def run(self):
-        while not self.stop:
-            count = 0
-            temps = dict.fromkeys(TEMP_SENSORS)
-            for sensor in temps.keys():
-                temps[sensor] = []
-            while count < 5:
-                count = count + 1
-                for sensor in TEMP_SENSORS:
-                    temps[sensor].append(temp_sensor.__getattribute__(sensor))
-                sleep(1)
-            for sensor, s_temps in temps.items():
-                r, c, f = 0, 0, 0
-                for i in s_temps:
-                    r = r + i.raw
-                    c = c + i.C
-                    f = f + i.F
-                self.sensor[sensor] = Temperature(round(r/10, 1), round(c/10, 1), round(f/10, 1))
 
 
 class _FanController(object):
@@ -276,4 +246,4 @@ temp_sensor = _Temp()
 
 fans = Fans()
 
-__all__ = ['CoolingMonitor', 'fans', 'TEC', 'temp_sensor', 'WaterPump']
+__all__ = ['fans', 'TEC', 'temp_sensor', 'WaterPump']
