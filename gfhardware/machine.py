@@ -35,6 +35,24 @@ else:
 
 logger = logging.getLogger(LOGGER_NAME)
 
+# Under the forgectrl device broker the pulse device arrives as an
+# inherited fd (GF_PULSE_FD): the broker holds /dev/glowforge open for
+# its lifetime, so this process must never close it - handovers and
+# job boundaries no longer cycle the 40 V rail, and the broker (not
+# the kernel close) is the dead-man for a writer crash. Standalone,
+# the per-job open/flock/close below keeps the original semantics.
+_pulse_stream = None
+
+
+def _inherited_pulse_dev():
+    global _pulse_stream
+    fd = os.getenv('GF_PULSE_FD')
+    if fd is None:
+        return None
+    if _pulse_stream is None:
+        _pulse_stream = os.fdopen(int(fd), 'wb', buffering=0)
+    return _pulse_stream
+
 
 class Machine(BaseMachine):
     """
@@ -175,20 +193,30 @@ class Machine(BaseMachine):
     def _motion(self, msg: dict) -> None:
         logger.info('start motion')
         if self._safe_to_move:
-            # Hold /dev/glowforge open and flock(LOCK_EX)'d for the whole job:
-            # this arms the kernel dead man's switch, which halts motion and
-            # locks the laser if this process dies mid-print (the kernel
-            # triggers on release of a locked fd). The device is exclusive-
-            # open, so every pulse write and seek must route through this one
-            # fd; cnc.set_pulse_dev() points the seek helpers at
-            # it, and load_motion/generate_linear_puls accept the open file.
-            with open(PULS_DEVICE, 'wb', buffering=0) as pulse_dev:
-                fcntl.flock(pulse_dev, fcntl.LOCK_EX)
-                cnc.set_pulse_dev(pulse_dev)
+            # The job runs against a flock(LOCK_EX)'d pulse device fd:
+            # the lock arms the kernel dead man's switch on the open
+            # file description, and every pulse write and seek routes
+            # through the one fd (cnc.set_pulse_dev() points the seek
+            # helpers at it; load_motion/generate_linear_puls accept the
+            # open file). Broker mode reuses the inherited, never-closed
+            # fd; standalone opens and closes per job, the close being
+            # what fires the dead-man if this process dies mid-print.
+            inherited = _inherited_pulse_dev()
+            if inherited is not None:
+                fcntl.flock(inherited, fcntl.LOCK_EX)
+                cnc.set_pulse_dev(inherited)
                 try:
-                    self._motion_locked(msg, pulse_dev)
+                    self._motion_locked(msg, inherited)
                 finally:
                     cnc.set_pulse_dev(None)
+            else:
+                with open(PULS_DEVICE, 'wb', buffering=0) as pulse_dev:
+                    fcntl.flock(pulse_dev, fcntl.LOCK_EX)
+                    cnc.set_pulse_dev(pulse_dev)
+                    try:
+                        self._motion_locked(msg, pulse_dev)
+                    finally:
+                        cnc.set_pulse_dev(None)
         logger.info('end motion')
 
     def _motion_locked(self, msg: dict, pulse_dev) -> None:
