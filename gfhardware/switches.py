@@ -61,18 +61,18 @@ class InputDevice(object):
     def read_loop(self) -> SwitchEvent:
         """
         Enter an endless :func:`select.select()` loop that yields input events.
+
+        No EVIOCGRAB: other services (forgectrl's status endpoint) read this
+        device concurrently, and exclusivity of button *meaning* comes from
+        controller-mode selection (see forgectrl docs/SERVICES.md).
         """
-        evdev.ioctl_EVIOCGRAB(self.fd, 1)
-        try:
-            while True:
-                r, w, x = select.select([self.fd], [], [], .1)
-                if len(r) == 0:
-                    yield None
-                else:
-                    for event in self.read():
-                        yield event
-        finally:
-            evdev.ioctl_EVIOCGRAB(self.fd, 0)
+        while True:
+            r, w, x = select.select([self.fd], [], [], .1)
+            if len(r) == 0:
+                yield None
+            else:
+                for event in self.read():
+                    yield event
 
     def read(self) -> SwitchEvent:
         """
