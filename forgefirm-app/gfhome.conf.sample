@@ -27,7 +27,8 @@ save_sent_images: False
 # The heater stays off during homing; thermal policy belongs to the
 # motion controller.
 water_heater_percent: 0
-max_start_temp: 30
+# Real-temperature ceiling; the coolant conversion reads true degrees C.
+max_start_temp: 27
 
 [MOTION]
 # Extra lens half-steps applied after the hunt (0 = hall reference).

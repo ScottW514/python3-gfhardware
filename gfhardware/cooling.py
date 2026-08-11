@@ -6,6 +6,7 @@ SPDX-License-Identifier:    MIT
 """
 import logging
 import os
+from math import exp, log
 from threading import Thread
 from time import sleep
 
@@ -122,7 +123,7 @@ class Fans(object):
         self.exhaust.off()
         self.intake_1.off()
         self.air_assist.off()
-        self.purge.speed = 1
+        self.purge.set_pwm(1)
 
 
 class TEC(object):
@@ -154,11 +155,21 @@ class _TempSensor(object):
 
     @staticmethod
     def calc_coolant(in_value: int) -> float:
-        return (in_value * -0.09653) + 94  # Not perfect, but close
+        # Factory beta-equation conversion: 10k B3380 NTC in a 10k divider
+        # behind a 1.3x gain stage, 10-bit ADC. Authoritative statement with
+        # derivation and reference points: kernel-module-glowforge UAPI.md
+        # (coolant section); shared contract: forgectrl docs/SERVICES.md.
+        adc_f = 1024 * 1.3
+        if in_value <= 0 or in_value >= adc_f:
+            return -273.15      # open / shorted sensor
+        r = 10000 / (adc_f / in_value - 1)
+        rinf = 10000 * exp(-3380 / 298.15)
+        return 3380 / log(r / rinf) - 273.15
 
     @staticmethod
     def calc_power(in_value: int) -> float:
-        return (in_value * 0.08715) - 21  # Not perfect, but close
+        # Best-guess linear fit, unverified (kernel-module-glowforge UAPI.md)
+        return (in_value * 0.08715) - 21
 
 
 def _lm75_hwmon_path() -> str:
