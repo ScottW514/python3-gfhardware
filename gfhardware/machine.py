@@ -385,7 +385,11 @@ class Machine(BaseMachine):
         self._sw_thread.stop = True
         logger.info('joining switch thread')
         self._sw_thread.join()
-        cnc.disable()
+        # Rail policy belongs to the forgectrl broker when it owns the
+        # device: disabling on handback would drop the rail out from
+        # under the next writer. Standalone stands the rail down.
+        if _inherited_pulse_dev() is None:
+            cnc.disable()
         logger.info('shut down complete')
 
     def _switch_event(self, event: SwitchEvent) -> None:

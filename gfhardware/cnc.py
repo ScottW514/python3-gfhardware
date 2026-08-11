@@ -102,7 +102,13 @@ class _CNC(object):
 
     @staticmethod
     def reset():
-        _CNC.disable()
+        # Rail policy belongs to the forgectrl broker when it owns the
+        # device (GF_PULSE_FD): a disable here, with the enable that
+        # follows moments later in machine setup, is a fast off/on
+        # bounce on the marginal 40 V rail. Standalone keeps the full
+        # known-state sequence.
+        if os.getenv('GF_PULSE_FD') is None:
+            _CNC.disable()
         _CNC.set_ignored_faults(0)
         _CNC.clear_all()
         _CNC.set_step_freq(10000)
