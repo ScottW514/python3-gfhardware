@@ -21,7 +21,13 @@ serial is in effect - it is never set independently.
 The service ends the sequence silently - there is no completion
 message - so the run is considered homed once a hunt and at least one
 motion have completed and the service has been quiet for --quiet
-seconds.
+seconds, AND the session showed physical motion. Quiet alone is not
+success: against wedged stepper drivers (playback and counters run,
+motors dead) the service repeats the same visual correction until it
+gives up and goes silent. Two independent guards catch that: a run of
+near-identical motion corrections aborts the session, and the head
+accelerometer must have seen real motion at least once (it rides the
+gantry; bench-characterized thresholds) before quiet counts as homed.
 
 Exit codes: 0 = homed, 1 = configuration/connection failure,
 2 = homing did not complete.
@@ -38,6 +44,7 @@ import queue
 import shutil
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from queue import Queue
@@ -78,6 +85,72 @@ def load_config(path: str) -> bool:
     return True
 
 
+# Head accelerometer (glowforge.dts head-accel, i2c-3 @0x1e), resolved
+# by bus address - iio numbering follows probe order. Motion thresholds
+# bench-characterized: real motion >= ~1000 counts p2p in a window,
+# wedged drivers stay under ~210.
+HEAD_ACCEL_BUS = '3-001e'
+ACCEL_P2P_MOVING = 500
+# Consecutive motion corrections within this many microsteps of each
+# other count as the service repeating itself against a machine that is
+# not physically moving.
+REPEAT_TOL_STEPS = 60
+REPEAT_LIMIT = 3
+
+
+def _head_accel_dir():
+    base = '/sys/bus/iio/devices'
+    try:
+        for node in sorted(os.listdir(base)):
+            p = os.path.join(base, node)
+            if HEAD_ACCEL_BUS in os.path.realpath(p):
+                return p
+    except OSError:
+        pass
+    return None
+
+
+class _AccelWatch(threading.Thread):
+    """Session-long physical-motion witness: counts ~2 s windows in
+    which the head accelerometer's peak-to-peak cleared the motion
+    threshold. Zero windows across a session that 'completed' motion
+    actions means the gantry never moved."""
+
+    def __init__(self):
+        self.stop = False
+        self.motion_windows = 0
+        self._dir = _head_accel_dir()
+        threading.Thread.__init__(self, daemon=True)
+
+    def _read(self, axis: str) -> int:
+        with open('%s/in_accel_%s_raw' % (self._dir, axis)) as f:
+            return int(f.read())
+
+    def run(self):
+        if self._dir is None:
+            logger.warning('head accelerometer not found - '
+                           'motion witness disabled')
+            return
+        while not self.stop:
+            lo = {'x': None, 'y': None}
+            hi = {'x': None, 'y': None}
+            t0 = time.monotonic()
+            while time.monotonic() - t0 < 2.0 and not self.stop:
+                for ax in ('x', 'y'):
+                    try:
+                        v = self._read(ax)
+                    except (OSError, ValueError):
+                        continue
+                    if lo[ax] is None or v < lo[ax]:
+                        lo[ax] = v
+                    if hi[ax] is None or v > hi[ax]:
+                        hi[ax] = v
+            for ax in ('x', 'y'):
+                if lo[ax] is not None and hi[ax] - lo[ax] >= ACCEL_P2P_MOVING:
+                    self.motion_windows += 1
+                    break
+
+
 def home(machine, args) -> int:
     q_rx: Queue = Queue()
     q_tx: Queue = Queue()
@@ -111,6 +184,10 @@ def home(machine, args) -> int:
         last_activity = t0
         in_flight = ''
         done = set()
+        accel = _AccelWatch()
+        accel.start()
+        last_delta = None
+        repeats = 0
 
         while True:
             now = time.monotonic()
@@ -129,11 +206,34 @@ def home(machine, args) -> int:
             elif in_flight:
                 logger.info('%s completed', in_flight)
                 done.add(in_flight)
+                if in_flight == 'motion':
+                    st = getattr(machine, '_motion_stats', {}).get('stats', {})
+                    delta = (int(st.get('XEND', 0)), int(st.get('YEND', 0)))
+                    if (last_delta is not None
+                            and abs(delta[0] - last_delta[0]) <= REPEAT_TOL_STEPS
+                            and abs(delta[1] - last_delta[1]) <= REPEAT_TOL_STEPS):
+                        repeats += 1
+                        if repeats >= REPEAT_LIMIT:
+                            logger.error(
+                                'service repeated the same correction %d '
+                                'times - the machine is not physically '
+                                'moving (wedged stepper drivers?)',
+                                repeats + 1)
+                            return 2
+                    else:
+                        repeats = 0
+                    last_delta = delta
                 in_flight = ''
 
             if ('hunt' in done and 'motion' in done and not busy
                     and now - last_activity >= args.quiet):
-                logger.info('homing complete (service quiet %.0fs)', args.quiet)
+                if accel.motion_windows == 0:
+                    logger.error('service went quiet but the head '
+                                 'accelerometer never saw motion - NOT homed')
+                    return 2
+                logger.info('homing complete (service quiet %.0fs, '
+                            '%d motion windows)', args.quiet,
+                            accel.motion_windows)
                 result = 0
                 break
 
@@ -153,6 +253,10 @@ def home(machine, args) -> int:
             if result in PULS_ACTIONS:
                 in_flight = result
     finally:
+        try:
+            accel.stop = True
+        except NameError:
+            pass
         if result == 0:
             # Deterministic Z: the hunt file leaves the lens wherever its
             # pattern ends; re-reference against the hall sensor so the
