@@ -45,6 +45,13 @@ class _CNC(object):
     def _dev_seek(count):
         if _CNC.pulse_dev is not None:
             os.lseek(_CNC.pulse_dev.fileno(), count, os.SEEK_SET)
+            return
+        # The forgectrl broker holds the device exclusive-open for its
+        # lifetime; seek through the inherited fd - a transient
+        # self-open would fail -EBUSY against it.
+        fd = os.getenv('GF_PULSE_FD')
+        if fd is not None:
+            os.lseek(int(fd), count, os.SEEK_SET)
         else:
             with open(PULS_DEVICE, 'w') as f:
                 os.lseek(f.fileno(), count, os.SEEK_SET)
