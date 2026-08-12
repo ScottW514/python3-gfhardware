@@ -17,11 +17,11 @@ moves past that baseline (see "Firmware-update policy").
 
 | Piece | Role |
 |---|---|
-| `gfcloud.py` (`/usr/sbin`) | Full cloud-mode controller daemon. Started by its init script only when `controller_mode = cloud`; owns `/dev/glowforge` exclusively (grblHAL stays down). SIGTERM stops the service loop, safes the hardware, and exits. |
-| `gfhome.py` (`/usr/sbin`) | One-shot service-driven homing. Invoked for `$H` when `homing_mode = gfcloud`; dispatches with `allow_print=False` so a print can never run inside a homing session. |
+| `gfcloud.py` (`/usr/sbin`) | Full cloud-mode controller daemon. Spawned and supervised by forgectrl when `controller_mode = cloud` (the init script defers to the supervisor and remains a manual stop only); the pulse device arrives as a broker-inherited fd (`GF_PULSE_FD`) that is never closed, so job boundaries and mode switches do not cycle the 40 V rail. SIGTERM stops the service loop, safes the hardware, and exits. |
+| `gfhome.py` (`/usr/sbin`) | One-shot service-driven homing. Invoked for `$H` when `homing_mode = gfcloud`; dispatches with `allow_print=False` so a print can never run inside a homing session. Completion is guarded: a run of near-identical service corrections aborts (the machine is not physically moving), and quiet only counts as homed when the head accelerometer witnessed real motion during the session. |
 | `ffmachine.py` (site-packages) | Shared hardware-machine glue: identity overrides from the shared config, and the forgectrl-routed capture machine both clients use. |
 | `gfutilities` | Protocol/service layer: auth, WebSocket client, action dispatch, settings report, pulse-file handling. |
-| `gfhardware` | The hardware `Machine`: motion, laser latch, switches, cameras, thermal. |
+| `gfhardware` | The hardware `Machine`: motion, laser latch, switches, cameras. Thermal hardware belongs to the forgectrl cooling engine: the cloud client reports job state (`POST /cool/state`, with the pulse header's run fan duties as the per-job profile) and enforces the published verdict on its fire path — gaining the flow verification and over-temp protection the engine provides. |
 
 Camera captures route through forgectrl's snapshot endpoint (it owns the
 imx-media pipeline whenever a stream is open; the snapshot works during an
@@ -211,8 +211,9 @@ ForgeFIRM **never downloads or installs factory firmware.**
   action thread.
 - **Park-on-lid-open refinement:** on a lid-open abort, defer the return-home
   park until the lid closes (factory behavior) instead of skipping it.
-- **Coolant control per job:** the water pump is switched on at machine
-  initialize; the `WPon` pulse-header key has no applier — decide whether
-  per-job pump control is wanted.
+- **Coolant control per job:** the forgectrl cooling engine holds the pump
+  on as part of its idle posture; the `WPon` pulse-header key has no
+  applier — if per-job pump control is ever wanted, it belongs in the
+  engine's per-job profile (the `/cool/state` report), not here.
 - **Optional:** SPKI pinning to match the factory client; emulator
   (`gf-machine-emulator`) full-session parity.
