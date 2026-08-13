@@ -48,6 +48,10 @@ and the functional action handshake.
   path component of the WS URL, ~30 s expiry, single-use).
 - The WS client reconnects through a loop that re-runs `sign_in` for a fresh
   `ws_token` and rebuilds the URL on every reconnect.
+- The service drops the socket on its own schedule — roughly hourly in a long
+  idle session. That is routine: the reconnect loop re-authenticates with a
+  fresh `auth_token` and the machine stays signed in and serving actions
+  without operator involvement.
 - Any HTTP request that gets a 401 re-signs-in and replays once (the sign-in
   request itself never retries, so there is no recursion).
 - `ws_connect()` returns the running client; `GFUIService` stops it (flush
@@ -191,16 +195,10 @@ ForgeFIRM **never downloads or installs factory firmware.**
   `update_check`, `user_image`, or `factory_reset`; their exact expected
   payloads/acks are unconfirmed (current handlers are deliberate defaults —
   capture and adjust when first observed).
-- **Long-session soak:** exercise reconnect and mid-session `auth_token`
-  refresh over multi-hour sessions; exercise the oversize-job rejection live.
-- **Clean-stop exit on hardware:** confirm an init-script `stop` terminates the
-  daemon promptly on the machine (shutdown path is unit-tested).
+- **Oversize-job rejection:** not yet exercised against a live job larger than
+  the kernel ring.
 - **Packaged-path boot:** validate `gfcloud.init` autostart on a flashed image
   with `controller_mode = cloud`.
-- **Banner validation:** compatibility warning fires when the service is newer
-  than the baseline even on the latest ForgeFIRM; upgrade hint only when a
-  newer ForgeFIRM exists; silent when versions match; factory firmware never
-  surfaced.
 - **Streaming-during-run:** the kernel ring supports live append while running;
   interleaving download → ring-write → run (with backpressure) would lift the
   ring-size cap on job length.
