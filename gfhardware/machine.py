@@ -381,6 +381,15 @@ class Machine(BaseMachine):
 
     def _shutdown(self) -> None:
         logger.info('shutting down')
+        # Safe posture in EVERY mode: under the broker this process's
+        # exit is not a final close of the pulse device, so neither the
+        # kernel dead-man nor the close-relock fires on it. Stop motion
+        # and lock the latch explicitly, then hand the cooling engine a
+        # final disarmed/idle report so it stands down through cooldown.
+        cnc.stop()
+        cnc.laser_latch(1)
+        cooling_svc.set_armed(False)
+        cooling_svc.set_mode('idle')
         cooling_svc.stop = True
         self._sw_thread.stop = True
         logger.info('joining switch thread')
