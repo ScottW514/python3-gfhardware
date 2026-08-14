@@ -7,7 +7,7 @@ SPDX-License-Identifier:    MIT
 import fcntl
 import logging
 import os
-from time import sleep
+from time import monotonic, sleep
 
 from gfutilities import BaseMachine
 from gfutilities.configuration import get_cfg, set_cfg
@@ -52,6 +52,30 @@ def _inherited_pulse_dev():
     if _pulse_stream is None:
         _pulse_stream = os.fdopen(int(fd), 'wb', buffering=0)
     return _pulse_stream
+
+
+# The shared machine config: the same trivial "key = value" file the
+# GRBL controller and forgectrl read, so both controller modes honor
+# the same operator-facing tunables.
+MACHINE_CONF = os.environ.get('GFHOME_CONF', '/data/forgefirm.conf')
+
+
+def _conf_float(key: str, default: float) -> float:
+    try:
+        with open(MACHINE_CONF) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                k, v = line.split('=', 1)
+                if k.strip() == key:
+                    try:
+                        default = float(v.strip())  # last occurrence wins
+                    except ValueError:
+                        pass
+    except OSError:
+        pass
+    return default
 
 
 class Machine(BaseMachine):
@@ -103,13 +127,37 @@ class Machine(BaseMachine):
         BaseMachine.__init__(self)
 
     def _button_wait(self, msg: dict) -> None:
+        # The wait runs with the latch already unlocked, so it is
+        # bounded and supervised the same way GRBL mode's arm window is:
+        # the shared laser_button_timeout_s (default 300 s, clamped to
+        # 1-3600 - out-of-range values fall back, never wait-forever)
+        # bounds it, and an opened lid ends it. Timeout, lid, and cloud
+        # cancel all relock the latch and disarm before returning.
+        timeout_s = _conf_float('laser_button_timeout_s', 300.0)
+        if not 1.0 <= timeout_s <= 3600.0:
+            timeout_s = 300.0
+        deadline = monotonic() + timeout_s
         self._button_pressed = False
         set_button_color(ButtonColor.WHITE)
         logger.info('waiting for button')
+        abort = None
         while not self._button_pressed:
             if self._running_action_cancelled:
-                return
+                abort = 'cancelled'
+                break
+            if not self._sw_thread.all_switches()[InputSwitch.SW_DOORS]:
+                abort = 'lid opened'
+                break
+            if monotonic() > deadline:
+                abort = 'timed out'
+                break
             sleep(.1)
+        if abort is not None:
+            logger.warning('button wait %s - relocking the laser', abort)
+            cnc.laser_latch(1)
+            cooling_svc.set_armed(False)
+            self._running_action_cancelled = True
+            set_button_color(ButtonColor.OFF)
 
     @staticmethod
     def _config_from_pulse(state: str, header: dict):
