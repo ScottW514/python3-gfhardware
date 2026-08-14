@@ -13,6 +13,11 @@ logger = logging.getLogger(LOGGER_NAME)
 
 
 class ZAxis(object):
+    # Full Z travel is a few dozen full steps; several times that bounds a
+    # homing sweep so a failed hall sensor cannot drive the lens carriage
+    # against its stop indefinitely.
+    MAX_HOME_STEPS = 200
+
     @staticmethod
     def configure(enabled: bool = None, current: ZCur = ZCur.LOW, mode: Microstep = Microstep.HALF) -> None:
         logger.info('configuring z_enable: %s, current: %s, mode: %s' % (enabled, current, mode))
@@ -68,7 +73,7 @@ class ZAxis(object):
         if isinstance(cur, ZCur):
             cur = str(cur.value)
         elif isinstance(cur, int):
-            cur = str(int)
+            cur = str(cur)
         logger.debug('setting z_current to: %s' % cur)
         write_file(SYSFS_GF_BASE + 'head/z_current', cur)
 
@@ -101,6 +106,10 @@ class ZAxis(object):
         step = 1 if at_home else -1
         step_dir = Dir.Pos if at_home else Dir.Neg
         while ZAxis._home_sense() is not at_home:
+            if abs(step_count) >= ZAxis.MAX_HOME_STEPS:
+                raise RuntimeError(
+                    'z home sense never reached %s after %d steps '
+                    '(failed hall sensor?)' % (at_home, abs(step_count)))
             logger.debug('sending z_step: %s' % step_dir)
             ZAxis.step(step_dir)
             step_count = step_count + step

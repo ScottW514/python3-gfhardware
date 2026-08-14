@@ -20,19 +20,12 @@ logger = logging.getLogger('openglow')
 # managed from the forgectrl UI. Override the path with GFHOME_CONF.
 MACHINE_CONF = os.environ.get('GFHOME_CONF', '/data/forgefirm.conf')
 
-_HOSTNAME_ALPHABET = 'BCDFGHJKMQRTVWXY2346789'
-
-
 def hostname_for(serial) -> str:
-    """The factory serial -> hostname encoding (base 23 over the consonant
-    alphabet, up to six characters, split XXX-YYY) - the same derivation
-    gfhardware applies to the fuse serial."""
-    enc = ''
-    serial = int(serial)
-    while serial > 0 and len(enc) < 6:
-        enc = _HOSTNAME_ALPHABET[serial % 23] + enc
-        serial //= 23
-    return '{}-{}'.format(enc[:3], enc[3:])
+    """The factory serial -> hostname derivation. One implementation,
+    in gfhardware.id; imported lazily because importing gfhardware pulls
+    the hardware modules in."""
+    from gfhardware.id import hostname_for as derive
+    return derive(serial)
 
 
 def apply_identity_overrides(machine_conf: str = MACHINE_CONF) -> None:

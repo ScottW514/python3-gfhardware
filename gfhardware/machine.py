@@ -161,11 +161,23 @@ class Machine(BaseMachine):
 
     @staticmethod
     def _config_from_pulse(state: str, header: dict):
+        # Header values come from the service and go straight to motion
+        # hardware (step frequency, stepper currents, microstep/decay
+        # modes, fan duties): clamp each to its declared bounds before
+        # applying.
         for key, setting in MACHINE_SETTINGS.items():
             val = header.get(key, None)
             if val is not None:
                 func = getattr(setting, state)
                 if func is not None:
+                    if setting.min_value is not None and val < setting.min_value:
+                        logger.warning('pulse header %s=%r below %s; clamped',
+                                       key, val, setting.min_value)
+                        val = setting.min_value
+                    if setting.max_value is not None and val > setting.max_value:
+                        logger.warning('pulse header %s=%r above %s; clamped',
+                                       key, val, setting.max_value)
+                        val = setting.max_value
                     func(val)
 
     def _head_image(self, msg: dict, settings: dict = None) -> None:
@@ -190,7 +202,8 @@ class Machine(BaseMachine):
         img_upload(self._session, img, msg)
         if get_cfg('LOGGING.SAVE_SENT_IMAGES'):
             logger.info('saving Head Image')
-            open('%s/%s.jpeg' % (get_cfg('LOGGING.DIR'), msg['id']), 'wb').write(img)
+            with open('%s/%s.jpeg' % (get_cfg('LOGGING.DIR'), msg['id']), 'wb') as f:
+                f.write(img)
 
     def head_info(self) -> HeadInfo:
         (hw_id, serial, version, r5, r6) = read_file(SYSFS_GF_BASE + 'head/info').splitlines()
@@ -212,10 +225,14 @@ class Machine(BaseMachine):
 
     def _action_cleanup(self) -> None:
         """Post-action failsafe hook (BaseMachine runs it even when an action
-        crashes): lock the laser latch, extinguish the head emitters, and drop
-        the pulse-device registration. The deadman fd itself is closed by
-        _motion's with-block - when a crash happens mid-run, that close is
-        what fires the kernel dead man's switch."""
+        crashes): stop motion, lock the laser latch, extinguish the head
+        emitters, and drop the pulse-device registration. The deadman fd
+        itself is closed by _motion's with-block - when a crash happens
+        mid-run, that close is what fires the kernel dead man's switch."""
+        # cnc.stop() first: a crashed action must not leave the gantry
+        # running the rest of the program unsupervised with only the beam
+        # latched off. A controlled stop is a no-op when already idle.
+        cnc.stop()
         cnc.laser_latch(1)
         head_all_led_off()
         cnc.set_pulse_dev(None)
@@ -242,7 +259,8 @@ class Machine(BaseMachine):
         img_upload(self._session, img, msg)
         if get_cfg('LOGGING.SAVE_SENT_IMAGES'):
             logger.info('saving Lid Image')
-            open('%s/%s.jpeg' % (get_cfg('LOGGING.DIR'), msg['id']), 'wb').write(img)
+            with open('%s/%s.jpeg' % (get_cfg('LOGGING.DIR'), msg['id']), 'wb') as f:
+                f.write(img)
 
     def _motion(self, msg: dict) -> None:
         logger.info('start motion')
@@ -278,7 +296,15 @@ class Machine(BaseMachine):
         cnc.clear_all()
         # Download puls file from service
         logger.info('loading motion file from %s' % msg['motion_url'])
-        self._motion_stats = load_motion(self._session, msg['motion_url'], pulse_dev)
+        stats = load_motion(self._session, msg['motion_url'], pulse_dev)
+        if not stats:
+            # Rejected before anything reached the ring (bad magic, short
+            # or unusable header): cancel cleanly instead of subscripting
+            # False.
+            logger.error('motion file rejected; cancelling the action')
+            self._running_action_cancelled = True
+            return
+        self._motion_stats = stats
         logger.info('motion stats: %s' % self._motion_stats)
         if msg['action_type'] == 'print':
             send_wss_event(self._q_msg_tx, msg['id'], 'print:download:completed')
@@ -428,8 +454,14 @@ class Machine(BaseMachine):
         if cnc.state is not MachineState.IDLE:
             logger.info('machine is not idle, state: %s' % cnc.state.value)
             return False
-        if temp_sensor.water_2.C > int(get_cfg('THERMAL.MAX_START_TEMP')):
-            logger.info('machine temp is too high, temp: %s' % temp_sensor.water_2.C)
+        temp = temp_sensor.water_2.C
+        if temp > int(get_cfg('THERMAL.MAX_START_TEMP')):
+            logger.info('machine temp is too high, temp: %s' % temp)
+            return False
+        if temp <= -100:
+            # A dead or disconnected coolant sensor reads the -273.15
+            # sentinel, which must not pass the gate as "cold enough".
+            logger.info('coolant sensor reads invalid (%s); unsafe to move' % temp)
             return False
         return True
 

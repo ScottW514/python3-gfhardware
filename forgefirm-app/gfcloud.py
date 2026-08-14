@@ -18,6 +18,7 @@ SPDX-License-Identifier: MIT
 """
 import argparse
 import logging
+import os
 import shutil
 import signal
 import sys
@@ -47,14 +48,26 @@ def load_config(path: str) -> bool:
     if not get_cfg('SERVICE.SERVER_URL'):
         logger.error('config %s has no SERVICE section', path)
         return False
+    file_level = log_level(get_cfg('LOGGING.LEVEL'))
+    console_level = log_level(get_cfg('LOGGING.CONSOLE_LEVEL') or 'INFO')
     if get_cfg('LOGGING.FILE'):
         Path(get_cfg('LOGGING.FILE')).parent.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(get_cfg('LOGGING.FILE'))
-        fh.setLevel(log_level(get_cfg('LOGGING.LEVEL')))
+        # Owner-only: the log can carry protocol details.
+        old_umask = os.umask(0o077)
+        try:
+            fh = logging.FileHandler(get_cfg('LOGGING.FILE'))
+        finally:
+            os.umask(old_umask)
+        fh.setLevel(file_level)
         fh.setFormatter(logging.Formatter(
             '%(asctime)s (%(levelname)s) %(module)s:%(funcName)s %(message)s'))
         logger.addHandler(fh)
-    logger.setLevel(logging.DEBUG)
+    # The console handler (basicConfig, level 0) prints whatever the
+    # logger passes: never force DEBUG on the logger, or every debug
+    # record reaches the journal regardless of the configured levels.
+    for h in logging.getLogger().handlers:
+        h.setLevel(console_level)
+    logger.setLevel(min(file_level, console_level))
     return True
 
 

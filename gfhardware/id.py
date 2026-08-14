@@ -57,14 +57,25 @@ def serial() -> int:
         return int(_conf_value('serial'), 0)
 
 
-def hostname() -> str:
-    mid = serial()
-    ser = ""
-    while int(mid) > 0 and len(ser) < 6:
-        ser = 'BCDFGHJKMQRTVWXY2346789'[int(mid) % 23] + ser
-        mid = mid / 23
+_HOSTNAME_ALPHABET = 'BCDFGHJKMQRTVWXY2346789'
 
-    return "{}-{}".format(ser[:3], ser[3:])
+
+def hostname_for(serial_num) -> str:
+    """The factory serial -> hostname encoding (base 23 over the consonant
+    alphabet, up to six characters, split XXX-YYY). Integer arithmetic
+    only - float division corrupts digits on large serials - and no
+    trailing dash on short serials. The one Python implementation; the C
+    daemon mirrors it."""
+    enc = ''
+    serial_num = int(serial_num)
+    while serial_num > 0 and len(enc) < 6:
+        enc = _HOSTNAME_ALPHABET[serial_num % 23] + enc
+        serial_num //= 23
+    return '{}-{}'.format(enc[:3], enc[3:]) if len(enc) > 3 else enc
+
+
+def hostname() -> str:
+    return hostname_for(serial())
 
 
 def password() -> str:

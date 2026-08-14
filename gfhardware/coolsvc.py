@@ -90,13 +90,22 @@ class CoolingService(Thread):
                 request.Request('%s?%s' % (self._url, parse.urlencode(params)),
                                 method='POST'),
                 timeout=REPORT_TIMEOUT_S).close()
-        except OSError:
-            pass    # level-triggered: the next report self-heals
+        except Exception as e:
+            # Level-triggered: the next report self-heals. Nothing a
+            # half-restarted engine can throw (http.client exceptions
+            # included) may kill the reporter thread - or abort a job when
+            # report() is called from set_mode/set_armed on the action
+            # thread.
+            logger.debug('cooling report failed: %s', e)
 
     def run(self):
         while not self.stop:
             self.report()
             time.sleep(REPORT_PERIOD_S)
+        # Parting report: the shutdown path set idle/disarmed before
+        # stopping the reporter, so the engine hears the final state even
+        # if those direct reports raced a restart.
+        self.report()
 
     # --------------------------------------------------------- verdict
 
@@ -107,10 +116,12 @@ class CoolingService(Thread):
             with open(VERDICT_FILE) as f:
                 v = json.load(f)
             age = time.clock_gettime(time.CLOCK_MONOTONIC) - v['ts_mono']
-            if age > VERDICT_MAX_AGE_S:
+            # Negative age = future-dated ts_mono, which would otherwise
+            # read as permanently fresh (the C reader has the same guard).
+            if age > VERDICT_MAX_AGE_S or age < 0:
                 return None
             return v
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError):
             return None
 
     def fire_ok(self) -> bool:

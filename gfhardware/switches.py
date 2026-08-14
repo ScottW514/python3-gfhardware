@@ -120,7 +120,10 @@ class SwitchMonitor(Thread):
         self._input_dev = InputDevice(input_dev)
         self.stop = False
         self._event_handler = event_handler
-        Thread.__init__(self)
+        # daemon: the blocking evdev read_loop must never keep the process
+        # alive after the service loop has died - a wedged interpreter that
+        # cannot exit is invisible to the supervisor's respawn.
+        Thread.__init__(self, daemon=True)
 
     def run(self) -> None:
         logger.debug('THREAD START')

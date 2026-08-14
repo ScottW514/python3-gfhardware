@@ -229,7 +229,14 @@ class _CNC(object):
 
     @property
     def state(self) -> MachineState:
-        state = read_file(SYSFS_GF_BASE + 'cnc/state')
+        # The in-run safety poll lives on this property: an unknown or
+        # unreadable state degrades to FAULT (not running, not safe to
+        # start) instead of raising out of the poll and abandoning a
+        # running job.
+        try:
+            state = read_file(SYSFS_GF_BASE + 'cnc/state')
+        except OSError:
+            return MachineState.FAULT
         if state == 'disabled':
             return MachineState.DISABLED
         elif state == 'idle':
@@ -241,7 +248,8 @@ class _CNC(object):
         elif state == 'underrun':
             return MachineState.UNDERRUN
         else:
-            raise ValueError('Received invalid state: {}'.format(state))
+            logger.error('invalid cnc state: %r' % (state,))
+            return MachineState.FAULT
 
     @property
     def step_freq(self) -> int:
