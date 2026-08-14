@@ -180,8 +180,12 @@ class Machine(BaseMachine):
         # illumination=0: the factory captured ALL head images with the white
         # torch off - added white light washes out the measure-laser dot and
         # can break the cloud's focus/hunt analysis.
-        img = cam.capture(cam.GFCAM_HEAD, illumination=0)
-        head_all_led_off()
+        # try/finally: a failed capture must never leave the measure laser
+        # lit with no owner (it was just armed from HCil above).
+        try:
+            img = cam.capture(cam.GFCAM_HEAD, illumination=0)
+        finally:
+            head_all_led_off()
         logger.info('uploading Head Image')
         img_upload(self._session, img, msg)
         if get_cfg('LOGGING.SAVE_SENT_IMAGES'):
@@ -208,10 +212,12 @@ class Machine(BaseMachine):
 
     def _action_cleanup(self) -> None:
         """Post-action failsafe hook (BaseMachine runs it even when an action
-        crashes): lock the laser latch and drop the pulse-device registration.
-        The deadman fd itself is closed by _motion's with-block - when a crash
-        happens mid-run, that close is what fires the kernel dead man's switch."""
+        crashes): lock the laser latch, extinguish the head emitters, and drop
+        the pulse-device registration. The deadman fd itself is closed by
+        _motion's with-block - when a crash happens mid-run, that close is
+        what fires the kernel dead man's switch."""
         cnc.laser_latch(1)
+        head_all_led_off()
         cnc.set_pulse_dev(None)
         cooling_svc.set_armed(False)
         cooling_svc.set_mode('idle')
