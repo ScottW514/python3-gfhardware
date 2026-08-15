@@ -188,8 +188,8 @@ ForgeFIRM **never downloads or installs factory firmware.**
 
 | Where | Keys |
 |---|---|
-| `/data/etc/gfhome.conf` (seeded from `/etc/gfhome.conf.sample`) | `SERVICE.*` (server/status URLs), `FACTORY_FIRMWARE.CHECK` / `STATUS_FILE`, `FORGECTRL.URL`, `LOGGING.FILE` / `LEVEL` / `SAVE_PULS` / `SAVE_SENT_IMAGES` (both save flags default off), `MOTION.*`, `THERMAL.*`. |
-| `/data/forgefirm.conf` (managed from the forgectrl UI) | `controller_mode` (`grbl` / `cloud` — read by the forgectrl supervisor, which spawns exactly one controller at boot and on every mode switch; the init scripts defer to it), `homing_mode`, identity overrides `gf_serial` / `gf_password` (a serial override re-derives the hostname). |
+| `/data/etc/gfhome.conf` (seeded from `/etc/gfhome.conf.sample`) | `SERVICE.*` (server/status URLs), `FACTORY_FIRMWARE.CHECK` / `STATUS_FILE`, `FORGECTRL.URL`, `LOGGING.SAVE_PULS` / `SAVE_SENT_IMAGES` (both default off) and `LOGGING.CAPTURE_DIR` (default `/data/forgefirm/captures/<app>`), `MOTION.*`, `THERMAL.*`. |
+| `/data/forgefirm.conf` (managed from the forgectrl UI) | `controller_mode` (`grbl` / `cloud` — read by the forgectrl supervisor, which spawns exactly one controller at boot and on every mode switch; the init scripts defer to it), `homing_mode`, identity overrides `gf_serial` / `gf_password` (a serial override re-derives the hostname), and the log levels `log_gfcloud_disk` / `log_gfcloud_remote` and `log_gfhome_*` (each `off`..`debug`; read at process start, so applied at reboot). |
 
 ## Outstanding items
 
@@ -206,9 +206,6 @@ ForgeFIRM **never downloads or installs factory firmware.**
   ring-size cap on job length.
 - **Lid-flash hardware application:** drive the lid flash LED from `LCfl` (and
   any future exposure mapping) in gfhardware.
-- **`SAVE_SENT_IMAGES` path:** derives only from `LOGGING.DIR`; should derive
-  from `LOGGING.FILE` like `SAVE_PULS` so an unset dir cannot crash the image
-  action thread.
 - **Park-on-lid-open refinement:** on a lid-open abort, defer the return-home
   park until the lid closes (factory behavior) instead of skipping it.
 - **Coolant control per job:** the forgectrl cooling engine holds the pump

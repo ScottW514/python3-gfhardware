@@ -25,7 +25,7 @@ import sys
 import time
 from pathlib import Path
 
-from gfutilities.configuration import parse, get_cfg, log_level
+from gfutilities.configuration import parse, get_cfg
 from gfutilities import GFUIService
 
 import ffmachine
@@ -33,7 +33,6 @@ import ffmachine
 CONF = '/data/etc/gfhome.conf'
 CONF_SAMPLE = '/etc/gfhome.conf.sample'
 
-logging.basicConfig(format='(%(levelname)s) %(module)s:%(funcName)s %(message)s')
 logger = logging.getLogger('openglow')
 
 
@@ -51,26 +50,7 @@ def load_config(path: str) -> bool:
     if not get_cfg('SERVICE.SERVER_URL'):
         logger.error('config %s has no SERVICE section', path)
         return False
-    file_level = log_level(get_cfg('LOGGING.LEVEL'))
-    console_level = log_level(get_cfg('LOGGING.CONSOLE_LEVEL') or 'INFO')
-    if get_cfg('LOGGING.FILE'):
-        Path(get_cfg('LOGGING.FILE')).parent.mkdir(parents=True, exist_ok=True)
-        # Owner-only: the log can carry protocol details.
-        old_umask = os.umask(0o077)
-        try:
-            fh = logging.FileHandler(get_cfg('LOGGING.FILE'))
-        finally:
-            os.umask(old_umask)
-        fh.setLevel(file_level)
-        fh.setFormatter(logging.Formatter(
-            '%(asctime)s (%(levelname)s) %(module)s:%(funcName)s %(message)s'))
-        logger.addHandler(fh)
-    # The console handler (basicConfig, level 0) prints whatever the
-    # logger passes: never force DEBUG on the logger, or every debug
-    # record reaches the journal regardless of the configured levels.
-    for h in logging.getLogger().handlers:
-        h.setLevel(console_level)
-    logger.setLevel(min(file_level, console_level))
+    ffmachine.setup_captures('gfcloud')
     return True
 
 
@@ -79,6 +59,9 @@ def main() -> int:
     ap.add_argument('-c', '--config', default=CONF, help='config file (default %s)' % CONF)
     args = ap.parse_args()
 
+    # Logging first: syslog under the gfcloud program name, level from
+    # /data/forgefirm.conf (log_gfcloud_disk / _remote).
+    ffmachine.setup_logging('gfcloud')
     if not load_config(args.config):
         return 1
 

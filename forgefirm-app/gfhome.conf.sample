@@ -20,8 +20,13 @@ check: True
 status_file: /data/forgefirm/gf-latest.json
 
 [LOGGING]
-file: /data/log/gfhome/gfhome.log
-level: INFO
+# gfhome and gfcloud log through syslog under their own program names;
+# rsyslog files them under /data/log/forgefirm/<name>/ at the levels set
+# in the control panel (log_gfhome_* / log_gfcloud_* in
+# /data/forgefirm.conf, applied at reboot). Nothing to set here.
+# Optional debug captures (raw pulse files, the images sent to the
+# service) land in capture_dir (default /data/forgefirm/captures/<name>).
+save_puls: False
 save_sent_images: False
 
 [THERMAL]

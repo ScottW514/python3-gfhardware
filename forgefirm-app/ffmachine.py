@@ -2,23 +2,120 @@
 ffmachine - shared ForgeFIRM hardware-machine glue for the Glowforge
 web-service clients: the gfhome one-shot homing runner and the gfcloud
 full-cloud daemon both drive the same hardware Machine with captures
-routed through forgectrl, and honor the same shared-config identity
-overrides. Config-file parsing and logging stay in each client.
+routed through forgectrl, honor the same shared-config identity
+overrides, and log the same way: through syslog under their own program
+name, at the level the shared machine config sets for that logger.
+Config-file parsing stays in each client.
 
 (C) Copyright 2026
 Scott Wiederhold, s.e.wiederhold@gmail.com
 SPDX-License-Identifier: MIT
 """
 import logging
+import logging.handlers
 import os
+import sys
 
 from gfutilities.configuration import get_cfg, set_cfg
 
 logger = logging.getLogger('openglow')
 
-# The shared machine config (identity overrides, homing/controller mode),
-# managed from the forgectrl UI. Override the path with GFHOME_CONF.
+# The shared machine config (identity overrides, homing/controller mode,
+# log levels), managed from the forgectrl UI. Override the path with
+# GFHOME_CONF.
 MACHINE_CONF = os.environ.get('GFHOME_CONF', '/data/forgefirm.conf')
+
+# Where the optional debug captures (raw pulse files, sent images) go
+# when enabled: never inside the log tree, so an export stays small.
+CAPTURE_ROOT = '/data/forgefirm/captures'
+
+
+def read_machine_conf(machine_conf: str = MACHINE_CONF) -> dict:
+    """The shared machine config as a dict ("key = value" lines, '#'
+    comments); {} when unreadable."""
+    keys = {}
+    try:
+        with open(machine_conf) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                k, v = line.split('=', 1)
+                keys[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return keys
+
+
+# Level names of the shared config -> logging levels. Python has no
+# notice: notice emits INFO records, and rsyslog's notice filter then
+# keeps warnings and above from these loggers.
+_LEVELS = {'off': None, 'error': logging.ERROR, 'warning': logging.WARNING,
+           'notice': logging.INFO, 'info': logging.INFO,
+           'debug': logging.DEBUG}
+
+
+def emit_level(app: str, machine_conf: str = MACHINE_CONF):
+    """The level this process emits at: the more verbose of its disk and
+    remote levels (rsyslog filters per destination), FFLOG_LEVEL winning
+    over the file. None = nothing is emitted."""
+    keys = read_machine_conf(machine_conf)
+    names = [keys.get('log_%s_disk' % app, 'info'),
+             keys.get('log_%s_remote' % app, 'off')]
+    env = os.environ.get('FFLOG_LEVEL')
+    if env:
+        names = [env]
+    levels = [_LEVELS[n.lower()] for n in names if n.lower() in _LEVELS]
+    if not levels:
+        return logging.INFO
+    levels = [l for l in levels if l is not None]
+    return min(levels) if levels else None
+
+
+def setup_logging(app: str) -> None:
+    """Route this process's logging to syslog under program name `app`
+    (rsyslog files it under /data/log/forgefirm/<app>). The socket is
+    non-blocking: a message that cannot be queued is dropped, never
+    waited for. Lines are echoed to stderr on a terminal or with
+    FFLOG_STDERR=1 (bench runs). Call once, first thing."""
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    level = emit_level(app)
+    root.setLevel(logging.CRITICAL + 1 if level is None else level)
+    logging.raiseExceptions = False
+    # rsyslog stamps the severity; the line carries only the origin.
+    fmt = logging.Formatter('%(module)s:%(funcName)s %(message)s')
+    try:
+        h = logging.handlers.SysLogHandler(
+            address=os.environ.get('FFLOG_SOCK') or '/dev/log',
+            facility=logging.handlers.SysLogHandler.LOG_DAEMON)
+        h.socket.setblocking(False)
+        h.ident = '%s[%d]: ' % (app, os.getpid())
+        h.setFormatter(fmt)
+        root.addHandler(h)
+        have_syslog = True
+    except OSError:
+        have_syslog = False
+    echo = os.environ.get('FFLOG_STDERR', '') not in ('', '0') or sys.stderr.isatty()
+    if echo or not have_syslog:
+        sh = logging.StreamHandler(sys.stderr)
+        sh.setFormatter(logging.Formatter(
+            app + ': (%(levelname)s) %(module)s:%(funcName)s %(message)s'))
+        root.addHandler(sh)
+
+
+def setup_captures(app: str) -> None:
+    """After the app config is parsed: point the optional debug captures
+    (LOGGING.SAVE_PULS, LOGGING.SAVE_SENT_IMAGES) at LOGGING.CAPTURE_DIR,
+    default CAPTURE_ROOT/<app>, creating it only when a capture is on."""
+    d = get_cfg('LOGGING.CAPTURE_DIR') or '%s/%s' % (CAPTURE_ROOT, app)
+    set_cfg('LOGGING.DIR', d)
+    if get_cfg('LOGGING.SAVE_PULS') or get_cfg('LOGGING.SAVE_SENT_IMAGES'):
+        try:
+            os.makedirs(d, mode=0o700, exist_ok=True)
+        except OSError:
+            logger.warning('cannot create the capture directory %s', d)
 
 def hostname_for(serial) -> str:
     """The factory serial -> hostname derivation. One implementation,
@@ -35,16 +132,8 @@ def apply_identity_overrides(machine_conf: str = MACHINE_CONF) -> None:
     whatever is in the config store first wins. The hostname is never
     overridden independently: it derives from the serial, so a serial
     override re-derives it."""
-    keys = {}
-    try:
-        with open(machine_conf) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith('#') or '=' not in line:
-                    continue
-                k, v = line.split('=', 1)
-                keys[k.strip()] = v.strip()
-    except OSError:
+    keys = read_machine_conf(machine_conf)
+    if not keys:
         return
     for key, cfg in (('gf_serial', 'MACHINE.SERIAL'),
                      ('gf_password', 'MACHINE.PASSWORD')):
