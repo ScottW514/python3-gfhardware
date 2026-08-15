@@ -136,7 +136,7 @@ Service behavior worth knowing:
 - After any mid-job abort the service re-hunts; after a completed print it
   issues a `lid_image` and a Z re-hunt.
 - **The service dead-reckons machine position.** The return-to-home park runs
-  immune to the cancel flag (it still stops for lid/e-stop), and
+  immune to the cancel flag (it still stops for the lid), and
   `print:return_to_home:succeeded` is sent only when the park actually
   completed — reporting success without parking would offset every subsequent
   motion until the next camera re-home.
@@ -156,7 +156,7 @@ the storage backend reject it). Without `endpoint`, the legacy
 - The pulse file at `motion_url` is downloaded and written into the kernel
   pulse-device ring, then run. The deadman flock is held on one fd for the
   whole job; process death fires the kernel dead man's switch.
-- An in-run safety poll stops motion on cancellation, lid open, or e-stop, and
+- An in-run safety poll stops motion on cancellation or lid open, and
   post-action cleanup always locks the laser latch and drops the pulse-device
   registration — including when an action crashes.
 - A job larger than the ring is rejected cleanly ("job exceeds the device

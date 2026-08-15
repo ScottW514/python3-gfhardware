@@ -102,12 +102,6 @@ class Machine(BaseMachine):
         self._button_pressed: bool = False
         self._motion_stats: dict = {}
         self._sw_thread: SwitchMonitor = SwitchMonitor(SWITCH_DEVICE, self._switch_event)
-        # The factory board's estop sense line reads LOW whenever the
-        # steppers run (measured on live hardware: it drops for the whole
-        # duration of any X or Z move and recovers at idle), so it cannot
-        # gate motion there. Machines with a real e-stop circuit opt in
-        # via MOTION.ESTOP_HALTS_MOTION.
-        self._estop_halts_motion: bool = bool(get_cfg('MOTION.ESTOP_HALTS_MOTION'))
 
         set_cfg('MACHINE.HEAD_FIRMWARE', self.head_info().version, True)
         set_cfg('MACHINE.HEAD_ID', self.head_info().hardware_id, True)
@@ -383,17 +377,16 @@ class Machine(BaseMachine):
             sleep(.1)
         logger.info('current state: %s' % cnc.state)
         # Live safety poll: the hardware chain kills the BEAM on
-        # lid/interlock/estop by itself, but MOTION continued at full speed
+        # lid/interlock by itself, but MOTION continued at full speed
         # until now. Switch polarity follows _safe_to_move / _switch_event:
         # truthy = circuit closed / OK. SW_INTERLOCK deliberately does NOT
         # gate motion: its sense is inverted - the remote-interlock loop
         # reads active only when OPEN (Basic/Plus ship the 2-pin connector
         # factory-jumpered, so it reads inactive = satisfied there) - and
         # the hardware chain already disables the beam whenever the loop
-        # is open. SW_ESTOP gates motion only when
-        # MOTION.ESTOP_HALTS_MOTION is set - the factory board's estop
-        # sense reads False during any motion (measured), so it is
-        # idle-telemetry only there.
+        # is open. SW_HV_ENABLE is the readback of the chain's HV_ENABLE
+        # output (high only while a run feeds the charge-pump watchdog
+        # with the lid closed) and gates nothing here.
         stop_sent = False
         while cnc.state is MachineState.RUNNING:
             if not stop_sent:
@@ -401,13 +394,7 @@ class Machine(BaseMachine):
                 # A locally-aborted run must not report ':completed' to the
                 # service: marking the action cancelled routes the finish
                 # through the ':cancelled' event.
-                if self._estop_halts_motion and not switches[InputSwitch.SW_ESTOP]:
-                    logger.error('estop tripped mid-run; emergency halt')
-                    self._running_action_cancelled = True
-                    cnc.halt()
-                    cnc.disable()
-                    stop_sent = True
-                elif self._running_action_cancelled and not park:
+                if self._running_action_cancelled and not park:
                     logger.warning('action cancelled mid-run; stopping motion')
                     cnc.stop()
                     stop_sent = True

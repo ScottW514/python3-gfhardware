@@ -197,9 +197,6 @@ def home(machine, args) -> int:
         if not switches[InputSwitch.SW_DOORS]:
             logger.error('lid is open - close it and re-home')
             return 2
-        if not switches[InputSwitch.SW_ESTOP]:
-            logger.error('e-stop is tripped')
-            return 2
 
         t0 = time.monotonic()
         last_activity = t0

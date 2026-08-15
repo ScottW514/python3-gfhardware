@@ -65,7 +65,7 @@ class InputSwitch(IntEnum):
     SW_DOOR2 = 0x01
     SW_BUTTON = 0x02
     SW_DOORS = 0x03
-    SW_ESTOP = 0x04
+    SW_HV_ENABLE = 0x04  # readback of the HV_ENABLE output; monitoring only
     SW_INTERLOCK = 0x05
     SW_INTERLOCK_LATCH = 0x06
     SW_HEAD = 0x07
