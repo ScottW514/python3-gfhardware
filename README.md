@@ -8,3 +8,20 @@ of the `gfhardware` Python package; the ForgeFIRM image recipes install them
 directly from this directory. `forgefirm-app/docs/CLOUD.md` documents cloud
 mode: the service protocol as implemented, policies, configuration, and
 outstanding items.
+
+## License
+
+`gfhardware` and the ForgeFIRM applications are MIT licensed (see `LICENSE`),
+with one third-party component under a different license:
+
+- `gfhardware/src/bayer.c` and `bayer.h` are the Bayer demosaicing routines
+  from libdc1394 (Damien Douxchamps, Frederic Devernay; VNG and AHD from Dave
+  Coffin's DCRAW), licensed **LGPL-2.1-or-later** (`LICENSE.LGPL-2.1`). They
+  are compiled into the `gfhardware._cam` extension module together with the
+  MIT sources. Because this repository carries the complete source of both
+  parts and the standard build (`setup.py`), anyone can modify the LGPL
+  component and rebuild or relink `_cam` against it, which is how the LGPL's
+  relinking requirement is met.
+
+Binary packages built from this repository (including the ForgeFIRM image
+recipes) declare `MIT & LGPL-2.1-or-later` accordingly.

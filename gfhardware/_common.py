@@ -4,6 +4,10 @@ Scott Wiederhold, s.e.wiederhold@gmail.com
 https://community.openglow.org
 SPDX-License-Identifier:    MIT
 """
+import importlib.machinery
+import importlib.util
+import os
+import sysconfig
 from collections import namedtuple
 from enum import Enum, IntEnum
 from typing import Union
@@ -112,6 +116,27 @@ def write_attr(attr: str, val: Union[str, int]) -> None:
     write_file(attr, str(val))
 
 
+def load_installed_extension(name: str):
+    """
+    Import a compiled gfhardware extension from the interpreter's installed
+    copy of this package instead of from the running source tree.
+
+    A REMOTE_DEBUG session runs the package from a checkout that has no built
+    extensions; the copy installed on the machine has them, under whatever ABI
+    tag the interpreter uses. ``name`` is dotted relative to the package
+    ("_cam", "input.evdev").
+    """
+    parts = name.split('.')
+    for key in ('platlib', 'purelib'):
+        base = os.path.join(sysconfig.get_paths()[key], 'gfhardware', *parts[:-1])
+        spec = importlib.machinery.PathFinder.find_spec(parts[-1], [base])
+        if spec is not None:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    raise ImportError('installed gfhardware.%s extension not found in site-packages' % name)
+
+
 __all__ = [
     # Constants
     'LOGGER_NAME', 'PULS_DEVICE', 'SDMA', 'SYSFS_GF_BASE', 'SWITCH_DEVICE', 'TEMP_SENSORS', 'XY_STEP_PER_MM',
@@ -119,7 +144,7 @@ __all__ = [
     # Enums
     'ButtonColor', 'Dir', 'EventCode', 'InputSwitch', 'MachineState', 'Microstep', 'SynCode', 'ZCur',
     # Functions
-    'read_file', 'write_attr', 'write_file',
+    'load_installed_extension', 'read_file', 'write_attr', 'write_file',
     # Named Tuples
     'AxisPosition', 'HeadInfo', 'Position', 'PulsPosition', 'SwitchEvent', 'Temperature'
 ]

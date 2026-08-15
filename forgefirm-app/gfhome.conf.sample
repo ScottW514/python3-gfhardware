@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # gfhome - Glowforge web-service homing configuration.
 # Copied to /data/etc/gfhome.conf on first run; edit the copy.
 # Machine identity (serial/password) is read from the OCOTP fuses;

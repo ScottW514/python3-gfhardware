@@ -22,12 +22,17 @@ share one video-mux -> MIPI CSI-2 -> IPU CSI path to the 'ipu1_csi0 capture'
 video node; only the mux input and the illumination LED differ.
 """
 import logging
+import os
 import re
 import subprocess
 import time
 
-from gfhardware._cam import grab
-from gfhardware._common import LOGGER_NAME, SYSFS_GF_BASE, read_file, write_attr
+from gfhardware._common import LOGGER_NAME, SYSFS_GF_BASE, load_installed_extension, read_file, write_attr
+
+if os.getenv('REMOTE_DEBUG'):
+    grab = load_installed_extension('_cam').grab
+else:
+    from gfhardware._cam import grab
 
 logger = logging.getLogger(LOGGER_NAME)
 

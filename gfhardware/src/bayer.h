@@ -1,3 +1,9 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+/*
+ * Bayer pattern decoding declarations from libdc1394
+ * (1394-Based Digital Camera Control Library); see bayer.c.
+ */
+
 #include <stdint.h>
 
 typedef enum {

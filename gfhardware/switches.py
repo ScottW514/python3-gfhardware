@@ -16,11 +16,7 @@ from typing import Callable
 
 from gfhardware._common import *
 if os.getenv('REMOTE_DEBUG'):
-    import importlib.util
-    evdev_spec = importlib.util.spec_from_file_location(
-        "input.evdev", "/usr/lib/python3.7/site-packages/gfhardware/input/evdev.cpython-37m-arm-linux-gnueabi.so")
-    evdev = importlib.util.module_from_spec(evdev_spec)
-    evdev_spec.loader.exec_module(evdev)
+    evdev = load_installed_extension('input.evdev')
 else:
     from gfhardware.input import evdev
 

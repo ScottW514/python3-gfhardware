@@ -40,7 +40,10 @@ logger = logging.getLogger('openglow')
 def load_config(path: str) -> bool:
     if path == CONF and not Path(CONF).is_file() and Path(CONF_SAMPLE).is_file():
         Path(CONF).parent.mkdir(parents=True, exist_ok=True)
+        # The config may carry credentials; keep the sample's owner-only
+        # mode (copyfile does not preserve permissions).
         shutil.copyfile(CONF_SAMPLE, CONF)
+        os.chmod(CONF, 0o600)
     if not Path(path).is_file():
         logger.error('config file %s not found', path)
         return False

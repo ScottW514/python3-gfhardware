@@ -2,7 +2,7 @@
 ffmachine - shared ForgeFIRM hardware-machine glue for the Glowforge
 web-service clients: the gfhome one-shot homing runner and the gfcloud
 full-cloud daemon both drive the same hardware Machine with captures
-routed through forgectrl, and honour the same shared-config identity
+routed through forgectrl, and honor the same shared-config identity
 overrides. Config-file parsing and logging stay in each client.
 
 (C) Copyright 2026

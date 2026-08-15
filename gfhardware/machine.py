@@ -24,14 +24,7 @@ from gfhardware.leds import *
 from gfhardware.switches import *
 from gfhardware.z_axis import ZAxis
 
-if os.getenv('REMOTE_DEBUG'):
-    import importlib.util
-    cam_spec = importlib.util.spec_from_file_location(
-        "cam", "/usr/lib/python3.7/site-packages/gfhardware/cam.cpython-37m-arm-linux-gnueabi.so")
-    cam = importlib.util.module_from_spec(cam_spec)
-    cam_spec.loader.exec_module(cam)
-else:
-    from gfhardware import cam
+from gfhardware import cam
 
 logger = logging.getLogger(LOGGER_NAME)
 

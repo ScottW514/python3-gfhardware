@@ -187,7 +187,7 @@ ForgeFIRM **never downloads or installs factory firmware.**
 | Where | Keys |
 |---|---|
 | `/data/etc/gfhome.conf` (seeded from `/etc/gfhome.conf.sample`) | `SERVICE.*` (server/status URLs), `FACTORY_FIRMWARE.CHECK` / `STATUS_FILE`, `FORGECTRL.URL`, `LOGGING.FILE` / `LEVEL` / `SAVE_PULS` / `SAVE_SENT_IMAGES` (both save flags default off), `MOTION.*`, `THERMAL.*`. |
-| `/data/forgefirm.conf` (managed from the forgectrl UI) | `controller_mode` (`grbl` / `cloud` — applied at boot by the init scripts, mutually exclusive), `homing_mode`, identity overrides `gf_serial` / `gf_password` (a serial override re-derives the hostname). |
+| `/data/forgefirm.conf` (managed from the forgectrl UI) | `controller_mode` (`grbl` / `cloud` — read by the forgectrl supervisor, which spawns exactly one controller at boot and on every mode switch; the init scripts defer to it), `homing_mode`, identity overrides `gf_serial` / `gf_password` (a serial override re-derives the hostname). |
 
 ## Outstanding items
 
