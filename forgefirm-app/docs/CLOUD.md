@@ -178,9 +178,11 @@ ForgeFIRM **never downloads or installs factory firmware.**
   live service has moved past the tested baseline — regardless of whether a
   newer ForgeFIRM exists — plus an **upgrade recommendation** only when one
   does. The factory `.fw` is never offered.
-- `tested_against_gf` is intended to become dedicated release metadata pinned
-  by the release pipeline; until that field ships it reads the same value as
-  the advertised `MCov`.
+- `tested_against_gf` is `FACTORY_FIRMWARE.FW_VERSION` from the client's
+  configuration — the factory firmware version this build advertises as
+  `MCov` and was tested against. There is no separate release-side field:
+  the value travels config → `gf-latest.json` → forgectrl's status (`gfsvc`)
+  → the panel banner.
 
 ## Configuration
 
