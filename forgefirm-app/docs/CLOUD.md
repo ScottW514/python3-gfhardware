@@ -125,7 +125,8 @@ factory event/progress state machine is advisory):
 
 - Per action: `<action>:starting`, `<action>:completed`, `<action>:cancelled`.
 - Print lifecycle: `print:download:completed`, `print:running`,
-  `print:cancelled`, `print:return_to_home:succeeded`, `print:completed`.
+  `print:paused` / `print:resumed`, `print:cancelled`,
+  `print:return_to_home:succeeded`, `print:completed`.
 - Button: `button:pressed` / `button:released` (the app's "push the button"
   screen needs nothing else).
 - Unsolicited `lid:opened` / `lid:closed` — these drive the app's header state
@@ -136,10 +137,13 @@ Service behavior worth knowing:
 - After any mid-job abort the service re-hunts; after a completed print it
   issues a `lid_image` and a Z re-hunt.
 - **The service dead-reckons machine position.** The return-to-home park runs
-  immune to the cancel flag (it still stops for the lid), and
+  after every print, finished or aborted, and ignores the lid and the cancel
+  flag while it runs (the factory parks with the lid open, and a park cut short
+  would offset every subsequent motion until the next camera re-home);
   `print:return_to_home:succeeded` is sent only when the park actually
-  completed — reporting success without parking would offset every subsequent
-  motion until the next camera re-home.
+  completed. A job refused before it moved (lid or interlock open at start —
+  a backstop, the app itself will not print until the lid is closed and imaged)
+  ends `:cancelled`, never `:completed`.
 - Server-side session state can be sticky: after abnormal session deaths the
   service may stall silently mid-sequence in the next session. A fresh WS
   session recovers it.
@@ -156,8 +160,28 @@ the storage backend reject it). Without `endpoint`, the legacy
 - The pulse file at `motion_url` is downloaded and written into the kernel
   pulse-device ring, then run. The deadman flock is held on one fd for the
   whole job; process death fires the kernel dead man's switch.
-- An in-run safety poll stops motion on cancellation or lid open, and
-  post-action cleanup always locks the laser latch and drops the pulse-device
+- The job is supervised the way the factory firmware supervises it. The
+  hardware chain kills the beam on the lid and the interlock loop by itself;
+  the client decides what motion and the job do, reacting on the switch edge
+  (the switch thread wakes the run loop; the level read every 100 ms is the
+  backstop):
+  - lid or interlock loop opens during a print/motion, or the service cancels
+    it, or the cooling verdict pulls fire: controlled stop (`cnc/stop`,
+    position kept), job cancelled; a print then parks (with the lid open, if
+    it is) and reports `:cancelled`;
+  - lid or interlock open during the pre-print button wait: latch relocked,
+    job cancelled; a press with the lid open never arms;
+  - a hunt ignores the lid (lens travel plus the service's XY hunt pattern);
+  - **the button pauses and resumes a print**: press → controlled stop, then
+    `cloud_pause_backtrack_ticks` (default 2000) ticks backward with the laser
+    off, `print:paused`; press again → forward with the laser re-enabled after
+    `cloud_resume_lead_ticks` (default 1950), `print:resumed`. The laser latch
+    stays unlocked and the armed window open through the pause (HV_ENABLE drops
+    by itself when the stream stops, and the resume lead covers its re-arm);
+    lid, interlock or a service cancel while paused cancel the job from where
+    it stands. Motions and hunts do not pause. Both tick counts are
+    `forgefirm.conf` keys.
+- Post-action cleanup always locks the laser latch and drops the pulse-device
   registration — including when an action crashes.
 - A job larger than the ring is rejected cleanly ("job exceeds the device
   ring") and the action safe-aborts. The whole job is buffered before running,
@@ -206,8 +230,9 @@ ForgeFIRM **never downloads or installs factory firmware.**
   ring-size cap on job length.
 - **Lid-flash hardware application:** drive the lid flash LED from `LCfl` (and
   any future exposure mapping) in gfhardware.
-- **Park-on-lid-open refinement:** on a lid-open abort, defer the return-home
-  park until the lid closes (factory behavior) instead of skipping it.
+- **Pause constants from the job:** the pulse header's `CCbp` / `CCbt` keys
+  are the likely factory source of the backtrack and resume-lead counts; once
+  a captured header confirms it, prefer them over the `forgefirm.conf` values.
 - **Coolant control per job:** the forgectrl cooling engine holds the pump
   on as part of its idle posture; the `WPon` pulse-header key has no
   applier — if per-job pump control is ever wanted, it belongs in the

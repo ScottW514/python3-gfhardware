@@ -7,7 +7,9 @@ SPDX-License-Identifier:    MIT
 import fcntl
 import logging
 import os
+from threading import Event
 from time import monotonic, sleep
+from typing import Union
 
 from gfutilities import BaseMachine
 from gfutilities.configuration import get_cfg, set_cfg
@@ -102,6 +104,16 @@ class Machine(BaseMachine):
         self._button_pressed: bool = False
         self._motion_stats: dict = {}
         self._sw_thread: SwitchMonitor = SwitchMonitor(SWITCH_DEVICE, self._switch_event)
+        # Edge-to-run-loop signaling. The switch thread flags edges and
+        # wakes the run loop; the run loop (the one owner of every cnc
+        # write during a job) reacts on the wake instead of at its next
+        # 100 ms tick, so a lid open reaches cnc/stop within a few ms.
+        # _button_edges counts presses seen while a job runs (the pause /
+        # resume toggle); _enclosure_edge latches a lid or interlock open
+        # seen by the edge thread until the run loop consumes it.
+        self._run_wake: Event = Event()
+        self._button_edges: int = 0
+        self._enclosure_edge: bool = False
 
         set_cfg('MACHINE.HEAD_FIRMWARE', self.head_info().version, True)
         set_cfg('MACHINE.HEAD_ID', self.head_info().hardware_id, True)
@@ -113,32 +125,59 @@ class Machine(BaseMachine):
 
         BaseMachine.__init__(self)
 
+    # Switch polarity, everywhere below: truthy = circuit closed / OK for
+    # the lid (SW_DOORS, the series chain the hardware safety chain itself
+    # uses); the remote-interlock loop (SW_INTERLOCK) has the INVERTED
+    # sense - it reads active only when the loop is OPEN (Basic/Plus ship
+    # the 2-pin connector factory-jumpered, so it reads inactive =
+    # satisfied there). SW_HV_ENABLE is the readback of the chain's
+    # HV_ENABLE output and gates nothing. The hardware chain kills the
+    # BEAM on lid or interlock by itself; what the checks below decide is
+    # what MOTION and the job do.
+    @staticmethod
+    def _enclosure_open(switches: dict) -> Union[str, None]:
+        """'lid opened' / 'interlock opened' when the enclosure is not
+        safe, else None."""
+        if not switches[InputSwitch.SW_DOORS]:
+            return 'lid opened'
+        if switches[InputSwitch.SW_INTERLOCK]:
+            return 'interlock opened'
+        return None
+
     def _button_wait(self, msg: dict) -> None:
         # The wait runs with the latch already unlocked, so it is
         # bounded and supervised the same way GRBL mode's arm window is:
         # the shared laser_button_timeout_s (default 300 s, clamped to
         # 1-3600 - out-of-range values fall back, never wait-forever)
-        # bounds it, and an opened lid ends it. Timeout, lid, and cloud
-        # cancel all relock the latch and disarm before returning.
+        # bounds it, and an opened lid or interlock loop ends it (the
+        # hardware button latch would ignore the press anyway). Timeout,
+        # lid, interlock, and cloud cancel all relock the latch and disarm
+        # before returning. Wakes on switch edges, so a press or a lid
+        # open is seen within milliseconds.
         timeout_s = _conf_float('laser_button_timeout_s', 300.0)
         if not 1.0 <= timeout_s <= 3600.0:
             timeout_s = 300.0
         deadline = monotonic() + timeout_s
         self._button_pressed = False
+        self._run_wake.clear()
         set_button_color(ButtonColor.WHITE)
         logger.info('waiting for button')
         abort = None
-        while not self._button_pressed:
+        while True:
+            reason = self._enclosure_open(self._sw_thread.all_switches())
             if self._running_action_cancelled:
                 abort = 'cancelled'
                 break
-            if not self._sw_thread.all_switches()[InputSwitch.SW_DOORS]:
-                abort = 'lid opened'
+            if reason is not None:
+                abort = reason
+                break
+            if self._button_pressed:
                 break
             if monotonic() > deadline:
                 abort = 'timed out'
                 break
-            sleep(.1)
+            self._run_wake.wait(.1)
+            self._run_wake.clear()
         if abort is not None:
             logger.warning('button wait %s - relocking the laser', abort)
             cnc.laser_latch(1)
@@ -201,8 +240,11 @@ class Machine(BaseMachine):
         )
 
     def _hunt(self, msg: dict) -> None:
+        # A hunt is lens travel plus the service's XY hunt pattern; the
+        # lid does not gate it (the factory runs a hunt with the lid open,
+        # and the beam is blocked in hardware regardless).
         ZAxis.home()
-        self._motion(msg)
+        self._motion(msg, lid_gated=False)
         home_offset = int(get_cfg('MOTION.Z_HOME_OFFSET') or 0)
         if home_offset != 0:
             logger.debug('moving z to home offset %s half steps' % home_offset)
@@ -249,9 +291,16 @@ class Machine(BaseMachine):
             with open('%s/%s.jpeg' % (get_cfg('LOGGING.DIR'), msg['id']), 'wb') as f:
                 f.write(img)
 
-    def _motion(self, msg: dict) -> None:
+    def _motion(self, msg: dict, lid_gated: bool = True) -> None:
         logger.info('start motion')
-        if self._safe_to_move:
+        if not self._safe_to_move(lid_gated):
+            # Refused before anything moved. The service dead-reckons from
+            # the events it gets back, so a job that never ran must end
+            # ':cancelled', never ':completed'. (The service itself will
+            # not print with the lid open - the app requires the lid
+            # closed and imaged first - so this is a backstop.)
+            self._running_action_cancelled = True
+        else:
             # The job runs against a flock(LOCK_EX)'d pulse device fd:
             # the lock arms the kernel dead man's switch on the open
             # file description, and every pulse write and seek routes
@@ -265,7 +314,7 @@ class Machine(BaseMachine):
                 fcntl.flock(inherited, fcntl.LOCK_EX)
                 cnc.set_pulse_dev(inherited)
                 try:
-                    self._motion_locked(msg, inherited)
+                    self._motion_locked(msg, inherited, lid_gated)
                 finally:
                     cnc.set_pulse_dev(None)
             else:
@@ -273,12 +322,12 @@ class Machine(BaseMachine):
                     fcntl.flock(pulse_dev, fcntl.LOCK_EX)
                     cnc.set_pulse_dev(pulse_dev)
                     try:
-                        self._motion_locked(msg, pulse_dev)
+                        self._motion_locked(msg, pulse_dev, lid_gated)
                     finally:
                         cnc.set_pulse_dev(None)
         logger.info('end motion')
 
-    def _motion_locked(self, msg: dict, pulse_dev) -> None:
+    def _motion_locked(self, msg: dict, pulse_dev, lid_gated: bool = True) -> None:
         """Body of a motion/print job; runs with the deadman fd held."""
         cnc.clear_all()
         # Download puls file from service
@@ -316,12 +365,15 @@ class Machine(BaseMachine):
                 if get_cfg('MOTION.WARM_UP_DELAY'):
                     sleep(int(get_cfg('MOTION.WARM_UP_DELAY')))
 
-        # Run motion job
+        # Run motion job. Only a print pauses on the button (the factory's
+        # print handler is the one that acts on the press); a motion or a
+        # hunt runs straight through.
         if not self._running_action_cancelled:
             if msg['action_type'] == 'print':
                 logger.info('start temps: %s' % str(temp_sensor.all))
                 send_wss_event(self._q_msg_tx, msg['id'], 'print:running')
-            self._run_loop()
+            self._run_loop(lid_gated=lid_gated,
+                           pausable=msg['action_type'] == 'print')
             cnc.laser_latch(1)
             cooling_svc.set_armed(False)
             pos = cnc.position
@@ -354,9 +406,12 @@ class Machine(BaseMachine):
         logger.info('end positions (%s, %s, %s)' % (pos.x.steps, pos.y.steps, pos.z.steps))
 
     def _return_home(self, pulse_dev) -> None:
-        # The park move is the response to an abort, so it must run even when
-        # the action is cancelled (park=True); the service dead-reckons from
-        # this move, so success is only reported when the park completed.
+        # The park is the response to an abort as much as to a finished
+        # print, so it runs regardless of the cancel flag and regardless
+        # of the lid: the factory parks with the lid open, and the service
+        # dead-reckons from this move. Success is reported only if the
+        # park ran to completion (a kernel fault is the one thing that
+        # ends it early).
         logger.info('start return home')
         pos = cnc.position
         generate_linear_puls(pos.x.steps * -1, pos.y.steps * -1, pulse_dev)
@@ -365,10 +420,44 @@ class Machine(BaseMachine):
             return
         send_wss_event(self._q_msg_tx, self.running_action_id, 'print:return_to_home:succeeded')
 
-    def _run_loop(self, park: bool = False) -> bool:
+    def _wait_kernel_idle(self, timeout_s: float = 10.0) -> bool:
+        """After a stop or a backtrack: True once the kernel reports idle
+        (the controlled decel has played out), False on timeout/fault."""
+        deadline = monotonic() + timeout_s
+        while monotonic() < deadline:
+            state = cnc.state
+            if state is MachineState.IDLE:
+                return True
+            if state is not MachineState.RUNNING:
+                return False
+            sleep(.01)
+        return False
+
+    def _run_loop(self, park: bool = False, lid_gated: bool = True,
+                  pausable: bool = False) -> bool:
+        """Play the loaded program. Returns True if the run was aborted
+        (stopped before the program's end), False if it ran to completion.
+
+        Reactions during the run - the factory's, both modes alike:
+          - lid or interlock loop opens: controlled stop, job cancelled
+            (a print then parks; the park itself ignores the lid);
+          - service cancel: the same stop;
+          - cooling verdict pulled: latch relocked, the same stop;
+          - button press (prints only): pause - stop, backtrack
+            cloud_pause_backtrack_ticks with the laser off, hold; the
+            next press resumes - forward with the laser re-enabled after
+            cloud_resume_lead_ticks. Lid/interlock/cancel while paused
+            cancel the job from where it stands.
+        The switch thread wakes this loop on every edge, so a reaction
+        lands within milliseconds; the level read each pass is the
+        backstop for an edge the thread missed.
+        """
         logger.info('starting run')
         logger.info('current state: %s' % cnc.state)
         set_button_color(ButtonColor.WHITE)
+        self._button_edges = 0
+        self._enclosure_edge = False
+        self._run_wake.clear()
         cnc.run()
         # Wait for state transition
         wait_time = 20
@@ -376,60 +465,103 @@ class Machine(BaseMachine):
             wait_time = wait_time - 1
             sleep(.1)
         logger.info('current state: %s' % cnc.state)
-        # Live safety poll: the hardware chain kills the BEAM on
-        # lid/interlock by itself, but MOTION continued at full speed
-        # until now. Switch polarity follows _safe_to_move / _switch_event:
-        # truthy = circuit closed / OK. SW_INTERLOCK deliberately does NOT
-        # gate motion: its sense is inverted - the remote-interlock loop
-        # reads active only when OPEN (Basic/Plus ship the 2-pin connector
-        # factory-jumpered, so it reads inactive = satisfied there) - and
-        # the hardware chain already disables the beam whenever the loop
-        # is open. SW_HV_ENABLE is the readback of the chain's HV_ENABLE
-        # output (high only while a run feeds the charge-pump watchdog
-        # with the lid closed) and gates nothing here.
-        stop_sent = False
-        while cnc.state is MachineState.RUNNING:
-            if not stop_sent:
-                switches = self._sw_thread.all_switches()
-                # A locally-aborted run must not report ':completed' to the
-                # service: marking the action cancelled routes the finish
-                # through the ':cancelled' event.
-                if self._running_action_cancelled and not park:
-                    logger.warning('action cancelled mid-run; stopping motion')
+        backtrack = int(_conf_float('cloud_pause_backtrack_ticks', 2000))
+        lead = int(_conf_float('cloud_resume_lead_ticks', 1950))
+        aborted = False
+        paused = False
+        while True:
+            state = cnc.state
+            if state is not MachineState.RUNNING and not paused:
+                break                       # program ended, or the kernel faulted
+            switches = self._sw_thread.all_switches()
+            enclosure = self._enclosure_open(switches)
+            if enclosure is None and self._enclosure_edge:
+                enclosure = 'lid opened'    # an edge the level read already missed
+            self._enclosure_edge = False
+            # A locally-aborted run must not report ':completed' to the
+            # service: marking the action cancelled routes the finish
+            # through the ':cancelled' event.
+            if self._running_action_cancelled and not park:
+                logger.warning('action cancelled mid-run; stopping motion')
+                aborted = True
+            elif enclosure is not None and lid_gated and not park:
+                logger.warning('%s mid-run; stopping motion', enclosure)
+                self._running_action_cancelled = True
+                aborted = True
+            elif cooling_svc.armed and not cooling_svc.fire_ok():
+                # The cooling engine's verdict (flow fault, over-temp,
+                # or an absent engine) pulls the job: latch the laser
+                # and stop.
+                verdict = cooling_svc.verdict()
+                logger.error('cooling verdict pulled fire mid-run: %s',
+                             verdict)
+                cnc.laser_latch(1)
+                if verdict is None:
+                    # Engine absent: if it died mid flow-check the
+                    # heater is still on - a write nobody else will
+                    # make now.
+                    WaterPump.heater_off()
+                self._running_action_cancelled = True
+                aborted = True
+            if aborted:
+                if not paused:
                     cnc.stop()
-                    stop_sent = True
-                elif not switches[InputSwitch.SW_DOORS]:
-                    logger.warning('lid opened mid-run; stopping motion')
-                    self._running_action_cancelled = True
-                    cnc.stop()
-                    stop_sent = True
-                elif cooling_svc.armed and not cooling_svc.fire_ok():
-                    # The cooling engine's verdict (flow fault, over-temp,
-                    # or an absent engine) pulls the job: latch the laser
-                    # and stop.
-                    verdict = cooling_svc.verdict()
-                    logger.error('cooling verdict pulled fire mid-run: %s',
-                                 verdict)
-                    cnc.laser_latch(1)
-                    if verdict is None:
-                        # Engine absent: if it died mid flow-check the
-                        # heater is still on - a write nobody else will
-                        # make now.
-                        WaterPump.heater_off()
-                    self._running_action_cancelled = True
-                    cnc.stop()
-                    stop_sent = True
-            sleep(.1)
+                    self._wait_kernel_idle()
+                break
+            if pausable and self._button_edges:
+                self._button_edges = 0
+                if paused:
+                    logger.info('button pressed while paused; resuming '
+                                '(laser lead %d ticks)', lead)
+                    try:
+                        cnc.resume(lead)
+                    except OSError as e:
+                        logger.error('resume refused (%s); cancelling', e)
+                        self._running_action_cancelled = True
+                        aborted = True
+                        break
+                    paused = False
+                    send_wss_event(self._q_msg_tx, self.running_action_id,
+                                   'print:resumed')
+                    # Give the kernel a moment to leave idle before the
+                    # next pass reads the state.
+                    sleep(.05)
+                    continue
+                logger.info('button pressed mid-run; pausing')
+                cnc.stop()
+                if not self._wait_kernel_idle():
+                    break                   # fault: the state read above ends the loop
+                pos = cnc.position
+                if pos.bytes.processed >= pos.bytes.total:
+                    break                   # the decel ended the program: done
+                if backtrack > 0:
+                    try:
+                        cnc.resume(-backtrack)
+                    except OSError as e:
+                        # Not fatal: hold where the decel stopped.
+                        logger.warning('backtrack refused (%s); pausing in place', e)
+                    else:
+                        if not self._wait_kernel_idle():
+                            break
+                paused = True
+                send_wss_event(self._q_msg_tx, self.running_action_id,
+                               'print:paused')
+                logger.info('paused at %s', cnc.position)
+                continue
+            if paused and state not in (MachineState.IDLE, MachineState.RUNNING):
+                break                       # the kernel faulted while paused
+            self._run_wake.wait(.1)
+            self._run_wake.clear()
         logger.info('current state: %s' % cnc.state)
         set_button_color(ButtonColor.OFF)
         logger.info('finished run')
-        return stop_sent
+        return aborted
 
-    @property
-    def _safe_to_move(self) -> bool:
+    def _safe_to_move(self, lid_gated: bool = True) -> bool:
         switches = self._sw_thread.all_switches()
-        if not switches[InputSwitch.SW_DOORS]:
-            logger.info('door open, unsafe to move')
+        reason = self._enclosure_open(switches)
+        if reason is not None and lid_gated:
+            logger.info('%s, unsafe to move', reason)
             return False
         if cnc.state is not MachineState.IDLE:
             logger.info('machine is not idle, state: %s' % cnc.state.value)
@@ -468,12 +600,17 @@ class Machine(BaseMachine):
         logger.info('shut down complete')
 
     def _switch_event(self, event: SwitchEvent) -> None:
+        # Runs on the switch thread: report the edge to the service, flag
+        # it for the button wait / run loop, and wake them. Nothing here
+        # touches the cnc - the run loop owns those writes.
         logger.debug('received switch event %s' % str(event))
         if event.code == InputSwitch.SW_BUTTON:
             if event.val:
                 logger.info('button pushed')
                 send_wss_event(self._q_msg_tx, None, 'button:pressed')
                 self._button_pressed = True
+                self._button_edges += 1
+                self._run_wake.set()
             else:
                 logger.info('button released')
                 send_wss_event(self._q_msg_tx, None, 'button:released')
@@ -484,3 +621,14 @@ class Machine(BaseMachine):
             else:
                 logger.info('lid opened')
                 send_wss_event(self._q_msg_tx, None, 'lid:opened')
+                self._enclosure_edge = True
+                self._run_wake.set()
+        elif event.code == InputSwitch.SW_INTERLOCK:
+            # Active = the remote-interlock loop OPENED. Not reported to
+            # the service (see docs/CLOUD.md); gates the job like the lid.
+            if event.val:
+                logger.info('interlock loop opened')
+                self._enclosure_edge = True
+                self._run_wake.set()
+            else:
+                logger.info('interlock loop closed')

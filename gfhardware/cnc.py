@@ -127,8 +127,12 @@ class _CNC(object):
         _CNC.set_y_current(33)
 
     @staticmethod
-    def resume():
-        _CNC._command('resume')
+    def resume(steps: int):
+        """Kernel resume/backtrack (UAPI 'resume'): negative = laser off,
+        run that many ticks backward and stop (preload model only);
+        positive = run forward, re-enable the laser after that many
+        ticks; 0 = run forward without re-enabling the laser."""
+        write_attr(SYSFS_GF_BASE + 'cnc/resume', int(steps))
 
     @staticmethod
     def run():
