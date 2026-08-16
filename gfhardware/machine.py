@@ -418,6 +418,7 @@ class Machine(BaseMachine):
         if self._run_loop(park=True):
             logger.warning('return home interrupted; not reporting success')
             return
+        logger.info('return home complete')
         send_wss_event(self._q_msg_tx, self.running_action_id, 'print:return_to_home:succeeded')
 
     def _wait_kernel_idle(self, timeout_s: float = 10.0) -> bool:
