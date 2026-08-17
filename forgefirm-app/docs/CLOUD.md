@@ -168,7 +168,10 @@ the storage backend reject it). Without `endpoint`, the legacy
   - lid or interlock loop opens during a print/motion, or the service cancels
     it, or the cooling verdict pulls fire: controlled stop (`cnc/stop`,
     position kept), job cancelled; a print then parks (with the lid open, if
-    it is) and reports `:cancelled`;
+    it is) and reports `:cancelled`. The park first drops what the job left
+    in the ring (the rest of an aborted print, or the whole print after a
+    cancel at the button wait) - the factory's "clearing pulse data" - so
+    nothing plays ahead of it; a job that never moved parks nothing;
   - lid or interlock open during the pre-print button wait: latch relocked,
     job cancelled; a press with the lid open never arms;
   - a hunt ignores the lid (lens travel plus the service's XY hunt pattern);

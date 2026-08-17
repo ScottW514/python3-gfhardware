@@ -414,6 +414,24 @@ class Machine(BaseMachine):
         # ends it early).
         logger.info('start return home')
         pos = cnc.position
+        # The ring still holds whatever the job did not play: the rest of a
+        # print aborted mid-run, or the whole print after a cancel at the
+        # button wait. A run would play that first - the head walking the
+        # job's path with the beam locked off - and only then the park.
+        # Drop it (data and byte counters; the position counters are what
+        # the park is computed from and stay), as the factory does before
+        # its return home.
+        try:
+            cnc.clear_pulse_and_byte()
+        except OSError as e:
+            # Refused while the kernel still runs: never park on top of an
+            # uncleared ring. No success is reported; the service re-hunts.
+            logger.error('return home: ring not cleared (%s); not parking', e)
+            return
+        if pos.x.steps == 0 and pos.y.steps == 0:
+            logger.info('return home: already at the job start')
+            send_wss_event(self._q_msg_tx, self.running_action_id, 'print:return_to_home:succeeded')
+            return
         generate_linear_puls(pos.x.steps * -1, pos.y.steps * -1, pulse_dev)
         if self._run_loop(park=True):
             logger.warning('return home interrupted; not reporting success')

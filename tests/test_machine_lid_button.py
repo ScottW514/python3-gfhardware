@@ -59,6 +59,8 @@ class FakeCNC:
         self.total = 1000
         self.latch = 1
         self.resume_error = None
+        self.clear_error = None
+        self.xy_steps = (10, 10)
 
     # -- attributes the Machine constructor maps pulse-header keys onto
     def set_step_freq(self, v): self.writes.append(('step_freq', v))
@@ -91,6 +93,12 @@ class FakeCNC:
         self.latch = int(v)
 
     def clear_all(self): self.writes.append(('clear_all', 1))
+
+    def clear_pulse_and_byte(self):
+        if self.clear_error is not None:
+            raise self.clear_error
+        self.writes.append(('clear_pulse', 1))
+
     def set_pulse_dev(self, dev): pass
     def enable(self): pass
     def disable(self): pass
@@ -107,8 +115,10 @@ class FakeCNC:
 
     @property
     def position(self):
-        ax = AxisPosition(10, 1.0, 0.04)
-        return Position(ax, ax, ax, PulsPosition(self.total, self.processed))
+        x = AxisPosition(self.xy_steps[0], self.xy_steps[0] / 53.333, 0.0)
+        y = AxisPosition(self.xy_steps[1], self.xy_steps[1] / 53.333, 0.0)
+        z = AxisPosition(0, 0.0, 0.0)
+        return Position(x, y, z, PulsPosition(self.total, self.processed))
 
 
 class FakeSwitches:
@@ -516,3 +526,53 @@ class StartGateTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReturnHomeTests(unittest.TestCase):
+
+    def setUp(self):
+        CNC.__init__()
+        SW.__init__()
+        COOL.__init__()
+        del EVENTS[:]
+        self.m = make_machine()
+        SW.handler = self.m._switch_event
+        self.parks = []
+        machine_mod.generate_linear_puls = lambda x, y, dev: self.parks.append((x, y))
+
+    def tearDown(self):
+        machine_mod.generate_linear_puls = lambda x, y, dev: None
+
+    def test_park_clears_the_ring_before_it_runs(self):
+        # The job did not play out (a print aborted mid-run, or one cancelled
+        # at the button wait): what it left in the ring must not play ahead
+        # of the park.
+        CNC.xy_steps = (500, 300)
+        CNC.run_reads = 3
+        self.m._return_home(None)
+        w = CNC.writes
+        self.assertIn(('clear_pulse', 1), w)
+        self.assertIn(('run', 1), w)
+        self.assertLess(w.index(('clear_pulse', 1)), w.index(('run', 1)))
+        self.assertEqual(self.parks, [(-500, -300)])
+        self.assertEqual(job_events(), ['print:return_to_home:succeeded'])
+
+    def test_park_at_the_start_runs_nothing(self):
+        # Cancelled before it moved (the button wait): the ring holds the
+        # whole print; nothing may run, the head is already at the start.
+        CNC.xy_steps = (0, 0)
+        self.m._return_home(None)
+        self.assertIn(('clear_pulse', 1), CNC.writes)
+        self.assertNotIn(('run', 1), CNC.writes)
+        self.assertEqual(self.parks, [])
+        self.assertEqual(job_events(), ['print:return_to_home:succeeded'])
+
+    def test_refused_clear_parks_nothing(self):
+        # The kernel refuses the clear (still running): never park on top of
+        # an uncleared ring, and never claim success.
+        CNC.xy_steps = (500, 300)
+        CNC.clear_error = OSError(1, 'EPERM')
+        self.m._return_home(None)
+        self.assertNotIn(('run', 1), CNC.writes)
+        self.assertEqual(self.parks, [])
+        self.assertEqual(job_events(), [])
