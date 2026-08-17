@@ -7,8 +7,11 @@ SPDX-License-Identifier:    MIT
 
 if __name__ == '__main__':
     import argparse
-    from gfhardware.cam import capture, GFCAM_LID, GFCAM_HEAD
-    parser = argparse.ArgumentParser(description='Capture jpeg image from Glowforge camera.')
+    import sys
+    from gfhardware.cam import capture, GFCAM_LID, GFCAM_HEAD, LidOpen
+    parser = argparse.ArgumentParser(
+        description='Capture jpeg image from Glowforge camera. '
+                    'The cameras only capture with the lid closed.')
     parser.add_argument('--head', action='store_true',
                         help='Capture from head camera [default: lid camera]')
     parser.add_argument('filename', action='store',
@@ -18,11 +21,13 @@ if __name__ == '__main__':
     parser.add_argument('exposure', action='store',
                         default=None, type=int,
                         nargs='?',
-                        help='Sensor exposure in 1/16-line units, capped at 31600 [default: per-camera]')
+                        help='Sensor exposure in the fitted sensor\'s units, clamped to its '
+                             'frame length [default: per-camera]')
     parser.add_argument('gain', action='store',
                         default=None, type=int,
                         nargs='?',
-                        help='Sensor gain, 16-1023 [default: per-camera]')
+                        help='Sensor gain in the fitted sensor\'s units (OV5648 16 = 1x, '
+                             'OV8856 128 = 1x) [default: per-camera]')
     parser.add_argument('illumination', action='store',
                         default=132, type=int,
                         nargs='?',
@@ -33,5 +38,12 @@ if __name__ == '__main__':
     if args.head:
         camera = GFCAM_HEAD
 
+    # Capture before opening the output: a refused or failed capture must not
+    # truncate a file that already holds a good image.
+    try:
+        img = capture(camera, args.exposure, args.gain, args.illumination)
+    except LidOpen as e:
+        sys.exit('%s' % e)
+
     with open(args.filename, 'wb') as f:
-        f.write(capture(camera, args.exposure, args.gain, args.illumination))
+        f.write(img)

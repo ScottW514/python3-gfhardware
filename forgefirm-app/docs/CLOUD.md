@@ -28,6 +28,18 @@ imx-media pipeline whenever a stream is open; the snapshot works during an
 active stream and takes a per-shot lamp override), with direct V4L2 capture as
 the fallback when the daemon is unreachable.
 
+**The cameras only capture with the lid closed.** This is a privacy rule, not a
+factory behavior: the lid camera faces the room once the lid is raised, and the
+service asks for images on its own schedule. Both capture paths enforce it —
+forgectrl answers `409` and the direct fallback raises `gfhardware.cam.LidOpen`
+— and the check fails closed, so an unreadable lid also refuses. There is no
+setting to disable it. A refused image action is reported to the service as
+`<action>:failed` so it resolves rather than hanging, and the client does not
+fall back to a direct grab that would refuse identically. **Consequence:** the
+factory ran focus hunts with the lid open and a hunt includes a head capture,
+so a hunt attempted with the lid open now fails; the lid must be shut before
+the app focuses or prints.
+
 ## Scope: telemetry is excluded
 
 The factory streams continuous telemetry; ForgeFIRM does not and will not.
@@ -233,6 +245,10 @@ ForgeFIRM **never downloads or installs factory firmware.**
   ring-size cap on job length.
 - **Lid-flash hardware application:** drive the lid flash LED from `LCfl` (and
   any future exposure mapping) in gfhardware.
+- **8 MP ("HD") machines:** an OV8856 machine captures 3264x2448, not the
+  2592x1944 a 5 MP machine sends. Whether the service accepts a larger image
+  for bed alignment and focus analysis is unknown — no 8 MP machine has been
+  on the bench.
 - **Pause constants from the job:** the pulse header's `CCbp` / `CCbt` keys
   are the likely factory source of the backtrack and resume-lead counts; once
   a captured header confirms it, prefer them over the `forgefirm.conf` values.

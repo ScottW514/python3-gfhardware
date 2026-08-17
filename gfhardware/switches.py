@@ -100,6 +100,33 @@ class InputDevice(object):
         return switch_states
 
 
+def lid_closed(device: str = SWITCH_DEVICE) -> bool:
+    """Is the lid closed right now?
+
+    A one-shot read for callers that need the answer without running a
+    SwitchMonitor thread (the camera privacy gate in gfhardware.cam). Reads
+    SW_DOORS -- the series combination of both lid switches, the same signal
+    the hardware safety chain uses -- so it cannot report closed while either
+    switch says otherwise.
+
+    Fails CLOSED: any error reading the device returns False. A caller that
+    gates on this keeps the cameras dark rather than capturing on a bad read.
+    """
+    dev = None
+    try:
+        dev = InputDevice(device)
+        return bool(dev.switch_states()[InputSwitch.SW_DOORS])
+    except Exception:  # noqa: BLE001 - deliberately total: unreadable = not closed
+        logger.warning('lid state unreadable; treating the lid as open')
+        return False
+    finally:
+        if dev is not None:
+            try:
+                dev.close()
+            except OSError:
+                pass
+
+
 class SwitchMonitor(Thread):
     """
     Switch Event Process Queue
@@ -140,4 +167,4 @@ class SwitchMonitor(Thread):
         return self._input_dev.switch_states()
 
 
-__all__ = ['SwitchMonitor']
+__all__ = ['SwitchMonitor', 'lid_closed']

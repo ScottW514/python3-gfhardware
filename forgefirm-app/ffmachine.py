@@ -161,9 +161,16 @@ def build_machine():
     added white light washes out the measure-laser dot the cloud's focus
     analysis needs. Direct capture remains the fallback when the daemon is
     unreachable.
+
+    The cameras only capture with the lid closed (a privacy rule, enforced
+    both in forgectrl and in gfhardware.cam). A refusal is distinguished from
+    a daemon failure and propagates instead of falling back: the action runner
+    reports it to the service as a failed action, so a request the machine
+    will not honor resolves instead of hanging.
     """
     import requests
     from gfhardware import Machine
+    from gfhardware.cam import LidOpen
     from gfhardware.leds import head_all_led_off, set_head_led_from_pulse
     from gfutilities.service.websocket import img_upload
 
@@ -176,6 +183,12 @@ def build_machine():
             if lamp is not None:
                 url += '&lamp=%d' % lamp
             rsp = requests.get(url, timeout=45)
+            # The privacy gate answers 409 with an explicit reason. That is a
+            # refusal, not a daemon failure: raise the same exception the
+            # direct path raises so the caller does not retry through a
+            # fallback that will refuse identically.
+            if rsp.status_code == 409 and b'lid is open' in rsp.content:
+                raise LidOpen(rsp.content.decode('utf-8', 'replace').strip())
             rsp.raise_for_status()
             if not rsp.content.startswith(b'\xff\xd8'):
                 raise ValueError('forgectrl returned a non-JPEG body')
@@ -191,6 +204,9 @@ def build_machine():
             logger.info('capturing Lid Image via forgectrl')
             try:
                 img = self._snapshot('lid')
+            except LidOpen as e:
+                logger.warning('lid image refused: %s', e)
+                raise
             except Exception:
                 logger.exception('forgectrl snapshot failed; direct capture')
                 return super()._lid_image(msg)
@@ -204,6 +220,11 @@ def build_machine():
                 set_head_led_from_pulse(settings['HCil'])
             try:
                 img = self._snapshot('head', lamp=0)
+            except LidOpen as e:
+                # The measure laser may have just been armed from HCil.
+                head_all_led_off()
+                logger.warning('head image refused: %s', e)
+                raise
             except Exception:
                 logger.exception('forgectrl snapshot failed; direct capture')
                 return super()._head_image(msg, settings)

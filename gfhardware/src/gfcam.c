@@ -18,6 +18,11 @@
  * gfhardware/cam.py) before this code simply streams the capture node. So all
  * this extension does now is open the node, set the raw-Bayer capture format,
  * grab one frame, debayer it, and JPEG-encode it.
+ *
+ * Two sensors ship in the field: the 5 MP OV5648 delivers 8-bit samples, and
+ * the 8 MP OV8856 in "HD" machines delivers 10-bit samples that the IPU CSI
+ * writes as little-endian 16-bit words. `depth` selects between them; a
+ * deeper frame is narrowed to 8 bits before the shared demosaic.
  */
 #include <Python.h>
 #include <fcntl.h>
@@ -56,9 +61,15 @@ static PyObject *method_grab(PyObject *self, PyObject *args) {
   int width;
   int height;
   int hflip = 0;
+  int depth = 8;
 
-  if(!PyArg_ParseTuple(args, "sii|i", &dev_path, &width, &height, &hflip)) {
+  if(!PyArg_ParseTuple(args, "sii|ii", &dev_path, &width, &height, &hflip,
+                       &depth)) {
     return NULL;
+  }
+  if (depth != 8 && depth != 10) {
+    return PyErr_Format(PyExc_ValueError, "depth must be 8 or 10, not %d",
+                        depth);
   }
 
   // All error paths must release everything acquired so far: a leaked fd
@@ -68,6 +79,7 @@ static PyObject *method_grab(PyObject *self, PyObject *args) {
   struct buffer *buffers = NULL;
   unsigned char *rgb_map = MAP_FAILED;
   uint32_t rgb_size = 0;
+  unsigned char *raw8 = NULL;   /* narrowing target when depth > 8 */
   int n_buffers = 0;
   int streaming = 0;
   struct v4l2_buffer buf;
@@ -94,13 +106,15 @@ static PyObject *method_grab(PyObject *self, PyObject *args) {
   }
 
   // Set capture format. The imx-media pipeline has already been configured for
-  // SBGGR8 at this geometry by gfhardware/cam.py; this just matches the node.
+  // this Bayer format and geometry by gfhardware/cam.py; this just matches the
+  // node. A 10-bit media-bus code maps to the 16-bit-per-sample pixel format.
   struct v4l2_format fmt;
   CLEAR(fmt);
   fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   fmt.fmt.pix.width = width;
   fmt.fmt.pix.height = height;
-  fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_SBGGR8;
+  fmt.fmt.pix.pixelformat = depth > 8 ? V4L2_PIX_FMT_SBGGR16
+                                      : V4L2_PIX_FMT_SBGGR8;
   fmt.fmt.pix.field = V4L2_FIELD_NONE;
   if (_ioctl(dev_fd, VIDIOC_S_FMT, &fmt) < 0) {
     PyErr_Format(PyExc_IOError, "VIDIOC_S_FMT failed");
@@ -216,9 +230,30 @@ static PyObject *method_grab(PyObject *self, PyObject *args) {
     PyErr_Format(PyExc_MemoryError, "rgb_map mmap failed");
     goto fail;
   }
+
+  // A deeper frame is narrowed to the 8-bit samples the demosaic takes.
+  // Samples are little-endian in the 16-bit word and clamped on the way
+  // down, so a source that turns out not to be right-aligned saturates
+  // rather than wrapping.
+  const uint8_t *bayer = (const uint8_t *)buffers[buf.index].start;
+  if (depth > 8) {
+    size_t n = (size_t)width * (size_t)height;
+    raw8 = malloc(n);
+    if (!raw8) {
+      PyErr_Format(PyExc_MemoryError, "raw8 malloc failed");
+      goto fail;
+    }
+    int shift = depth - 8;
+    for (size_t i = 0; i < n; i++) {
+      unsigned v = ((unsigned)bayer[2 * i] | ((unsigned)bayer[2 * i + 1] << 8))
+                   >> shift;
+      raw8[i] = (uint8_t)(v > 255 ? 255 : v);
+    }
+    bayer = raw8;
+  }
+
   dc1394_bayer_decoding_8bit(
-    (const uint8_t*)buffers[buf.index].start,
-    (uint8_t*)rgb_map, width, height,
+    bayer, (uint8_t*)rgb_map, width, height,
     DC1394_COLOR_FILTER_BGGR, DC1394_BAYER_METHOD_BILINEAR);
 
   // Stop stream and release capture resources (shared with the error path).
@@ -229,9 +264,11 @@ static PyObject *method_grab(PyObject *self, PyObject *args) {
       munmap(buffers[i].start, buffers[i].length);
   }
   free(buffers);
+  free(raw8);
   close(dev_fd);
   Py_END_ALLOW_THREADS
   buffers = NULL;
+  raw8 = NULL;
   dev_fd = -1;
 
   // JPEG encode. The ov5648 HFLIP register breaks imx-media CSI capture (frames
@@ -304,6 +341,7 @@ fail:
     }
     free(buffers);
   }
+  free(raw8);
   if (rgb_map != MAP_FAILED)
     munmap(rgb_map, rgb_size);
   if (dev_fd >= 0)
@@ -313,11 +351,14 @@ fail:
 
 static PyMethodDef module_methods[] = {
   {"grab", method_grab, METH_VARARGS,
-    "grab(device: str, width: int, height: int, hflip: int = 0) -> bytes\n\n"
-    "Streams one raw SBGGR8 frame from the given V4L2 capture node, debayers\n"
+    "grab(device: str, width: int, height: int, hflip: int = 0,\n"
+    "     depth: int = 8) -> bytes\n\n"
+    "Streams one raw BGGR frame from the given V4L2 capture node, debayers\n"
     "it to RGB, optionally mirrors it horizontally (hflip), and returns it as\n"
-    "a JPEG. The imx-media pipeline, sensor controls and illumination must\n"
-    "already be configured (see cam.py)."},
+    "a JPEG. depth is the sensor's bits per sample: 8 (OV5648, SBGGR8) or 10\n"
+    "(OV8856, SBGGR16 with the sample right-aligned in the word). The\n"
+    "imx-media pipeline, sensor controls and illumination must already be\n"
+    "configured (see cam.py)."},
   {NULL}
 };
 
