@@ -127,6 +127,23 @@ and made available to every image handler. Policy per key:
   `NRic` network-retry family); ForgeFIRM reports its own values and the
   service tolerates that.
 
+The service pushes very little, and it is worth knowing exactly how little
+before going looking for a setting that is not in a pulse header. Across every
+captured session, counting every action type and not just the opening one, the
+service has ever pushed seven keys: `IMct`, `NRic`, `HCil`, `HCae`, `HCex`,
+`HCag` and `HCga`. The opening `settings` action on its own carries one,
+`NRic`. Nothing thermal, nothing about fans, nothing that bounds the machine
+arrives this way. The operating envelope reaches the machine only in the pulse
+header, per job.
+
+The other half of that: for the header fields the service does not override
+with its own policy, what comes back is what this machine last reported. The
+`MACHINE_SETTINGS` defaults are largely placeholders, so those fields
+round-trip as placeholders. A field arriving as zero usually means ForgeFIRM
+sent zero, not that the service has nothing to say. Nothing downstream consumes
+them today, but it does mean the service is not a source of truth for any limit
+the machine itself declares.
+
 Head images are captured with the white torch off — added white light washes
 out the measure-laser dot the cloud's focus analysis needs.
 
@@ -202,6 +219,42 @@ the storage backend reject it). Without `endpoint`, the legacy
   ring") and the action safe-aborts. The whole job is buffered before running,
   so the ring size caps job length.
 
+### The pulse header
+
+Every pulse file opens with a header: a length, then a flat list of 4-character
+tags each carrying a 32-bit little-endian value. It is the job's operating
+envelope, and the factory firmware treats a well-formed one as a precondition
+for cutting at all. Of the tags it knows, 346 are accepted in a header and 29
+are mandatory; a header missing any one of the 29 is refused outright, and a
+known tag that is not header-legal is refused too. An unrecognized tag is only
+logged and skipped, which is why a newer service can talk to an older machine.
+
+The header is not a set of echoes. Roughly two thirds of the fields come back
+holding whatever the machine last reported, but the service substitutes real
+operating values for the ones that matter: fan duties, per-sensor temperature
+ceilings, lid IR flame thresholds, head accelerometer limits and a high-voltage
+current cap all arrive filled in per job.
+
+ForgeFIRM applies thirteen of them, and only those:
+
+| Tags | Applied to |
+|---|---|
+| `AArd`, `EFrd`, `IFrd` | run-phase fan duties, handed to the forgectrl cooling engine as the per-job profile |
+| `STfr` | step frequency |
+| `XSrc`, `YSrc` | stepper current while running |
+| `XShc`, `YShc` | stepper current while idle |
+| `XSdm`, `YSdm` / `XSmm`, `YSmm` | decay mode / microstep mode |
+| `ZSmd` | Z mode |
+
+Fan duties are honored on the scale the service uses: air assist 0 to 1023,
+exhaust and intake 0 to 65535.
+
+Everything else is dropped. Some of that is deliberate. Thermal policy belongs
+to the cooling engine, which runs its own coolant ceiling, flow verification,
+emission witness and silence timeout, and a machine should not let a remote
+service raise its own limits. The rest is not deliberate, and the specifics are
+in the outstanding items below.
+
 ## Firmware-update policy
 
 ForgeFIRM **never downloads or installs factory firmware.**
@@ -249,9 +302,75 @@ ForgeFIRM **never downloads or installs factory firmware.**
   2592x1944 a 5 MP machine sends. Whether the service accepts a larger image
   for bed alignment and focus analysis is unknown — no 8 MP machine has been
   on the bench.
+- **Pulse-header envelope not enforced:** nineteen of the twenty-nine header
+  fields the factory requires are read and discarded. None of them can put
+  energy anywhere (the hardware chain is the emission boundary and the header
+  never touches it), but each one the factory arms per job is a failure mode it
+  watches and ForgeFIRM does not:
+  - `AArn`/`AArx`, `EFrn`/`EFrx`, `IFrn`/`IFrx` are the run-phase tach windows
+    for air assist, exhaust and intake. ForgeFIRM reads every tach for the
+    dashboard and gates on none of them, so a fan that stalls mid-cut goes
+    unnoticed. The exhaust one is the fume path and is the first worth closing.
+    These particular fields are among the ones the service echoes rather than
+    fills: every captured header carries zero for all of them except `AArx`,
+    so a working gate needs locally configured thresholds and can only let a
+    header value tighten them. The factory's own policy is known even though
+    its numbers are not: a fan tach alert during a cut **pauses** the print,
+    taking the same transition a user pause takes. Two of the factory's three
+    tach monitors cannot fire at all, because they treat a zero limit as "not
+    configured", so on a factory machine a stalled extraction fan is caught by
+    the temperature it causes rather than by its tachometer.
+  - `PTmn`/`PTmx` cap the power-supply temperature. Only the coolant loop gates
+    today; board, head, interconnect, lid, fused and supply temperatures are
+    displayed and gate nothing, though the service sends real ceilings for all
+    of them. The factory runs two tiers on these: a plain temperature alert
+    pauses the print, and a `*_temp_critical` fails the machine outright. Watch
+    the units before adopting a ceiling, because they are per sensor rather
+    than universal. The coolant family is the worked example, carried twice in
+    parallel, once in raw ADC counts (`CT{i,w,r}{n,x}`, where "min" is the hot
+    end because the thermistors are NTCs) and once in millidegrees
+    (`CM{i,w,r}{n,x}`, with `CMhl`/`CMhu` hysteresis).
+  - `MCsn` is the machine serial. The factory refuses a pulse file whose serial
+    does not match; ForgeFIRM runs it.
+  - `PDfm` declares the pulse-data format. The factory made it mandatory so it
+    could refuse a stream it does not understand; ForgeFIRM assumes the format.
+  - The nine warmup-phase fan fields (`AAw*`, `EFw*`, `IFw*`) are ignored, so a
+    job's requested warmup airflow is not applied.
+
+  Beyond the required set, the header also carries head accelerometer run
+  thresholds (`HAxr`, `HAyr`, `HAar`), lid IR flame thresholds and baselines
+  (`IRwx`/`IRwc`, `IRxx`/`IRxc`, `IR?b`) and a high-voltage current cap
+  (`HIix`/`HIrx`). None has a ForgeFIRM counterpart: the head accelerometer is
+  used only as a motion-liveness probe, the IR fire watch ships disabled, and
+  beam detect is not read at all. In the factory these are graded rather than
+  uniform: an accelerometer or beam-detect *alert* pauses the print, the
+  matching *abort* aborts it, and the high-voltage current cap is in the
+  machine-unusable set alongside the critical temperatures.
+
+  One place the header is not the model to follow is the coolant loop. The
+  header carries a whole `CF` family for the factory's calorimetric flow
+  controller, with a setpoint, PI gains and a differential-temperature readout,
+  and none of it is ever sent. A stock machine reports none of those settings,
+  and the three faults the controller would raise have no raiser in the factory
+  image, so the factory watches coolant temperature and does not verify flow.
+  ForgeFIRM's flow verification is ahead of the factory here, not behind it.
+
+  Most of this is not the cloud client's to fix. Reading a header field is one
+  line here; enforcing a tach window or a temperature ceiling belongs to the
+  machine-services daemon, which owns the thermal hardware and publishes the
+  fire verdict, and it has to hold in GRBL mode too. The client's share is the
+  two refusals that are purely about the file it was handed, `MCsn` and `PDfm`,
+  and passing the rest of the envelope through to the engine rather than
+  dropping it on the floor. A limit that arrives from a remote service is a
+  limit that service can raise, so the shape to aim for is a header value that
+  can only tighten a locally configured ceiling, never loosen it.
+
 - **Pause constants from the job:** the pulse header's `CCbp` / `CCbt` keys
   are the likely factory source of the backtrack and resume-lead counts; once
   a captured header confirms it, prefer them over the `forgefirm.conf` values.
+  The `CC` family is header-only (it carries the job rather than the machine's
+  configuration) and its sources are unnamed in the factory firmware, so the
+  meanings have to come from observation rather than from reading.
 - **Coolant control per job:** the forgectrl cooling engine holds the pump
   on as part of its idle posture; the `WPon` pulse-header key has no
   applier — if per-job pump control is ever wanted, it belongs in the
