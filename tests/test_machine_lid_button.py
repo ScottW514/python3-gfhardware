@@ -819,3 +819,75 @@ class FeedWatchdogTests(unittest.TestCase):
         self.assertEqual(job_events(),
                          ['print:paused', 'print:resumed',    # the watchdog's hold
                           'print:paused', 'print:resumed'])   # the operator's press
+
+
+class JobLifecycleTests(unittest.TestCase):
+    """A print warms up before its first fire and rests after its last, and
+    a header key nothing acts on is recorded rather than ignored."""
+
+    def setUp(self):
+        CNC.__init__()
+        SW.__init__()
+        COOL.__init__()
+        del EVENTS[:]
+        self.m = make_machine()
+        self.slept = []
+        self._sleep = machine_mod.sleep
+        machine_mod.sleep = lambda s: self.slept.append(s)
+
+    def tearDown(self):
+        machine_mod.sleep = self._sleep
+        set_cfg('MOTION.WARM_UP_DELAY', None)
+        set_cfg('MOTION.COOL_DOWN_DELAY', None)
+
+    def test_the_factory_periods_are_the_defaults(self):
+        # Nothing configured: the machine still does what the factory does,
+        # measured on its own factory slot.
+        self.assertEqual(self.m._dwell('warm_up'), machine_mod.WARM_UP_DEFAULT_S)
+        self.assertEqual(self.m._dwell('cool_down'), machine_mod.COOL_DOWN_DEFAULT_S)
+        self.assertEqual(self.slept, [machine_mod.WARM_UP_DEFAULT_S,
+                                      machine_mod.COOL_DOWN_DEFAULT_S])
+
+    def test_a_configured_period_wins(self):
+        set_cfg('MOTION.WARM_UP_DELAY', '5')
+        self.assertEqual(self.m._dwell('warm_up'), 5.0)
+        self.assertEqual(self.slept, [5.0])
+
+    def test_zero_still_skips_the_period(self):
+        # A machine whose config carries the zeros the old sample shipped
+        # skips the hold, and the operator keeps that choice.
+        set_cfg('MOTION.WARM_UP_DELAY', 0)
+        set_cfg('MOTION.COOL_DOWN_DELAY', 0)
+        self.assertEqual(self.m._dwell('warm_up'), 0.0)
+        self.assertEqual(self.m._dwell('cool_down'), 0.0)
+        self.assertEqual(self.slept, [])
+
+    def test_a_nonsense_period_falls_back_to_the_factory_one(self):
+        set_cfg('MOTION.WARM_UP_DELAY', 'soon')
+        self.assertEqual(self.m._dwell('warm_up'), machine_mod.WARM_UP_DEFAULT_S)
+
+    def test_an_unhandled_header_key_is_named_once(self):
+        header = {'STfr': 10000, 'AArd': 200, 'MCsn': 0, 'PDfm': 0,
+                  'ZZzz': 4242}
+        with self.assertLogs(machine_mod.logger, level='DEBUG') as caught:
+            gaps = self.m._log_header_gaps(header)
+        self.assertEqual(gaps, ['ZZzz'])
+        named = [ln for ln in caught.output if 'ZZzz=4242' in ln]
+        self.assertEqual(len(named), 1, caught.output)
+
+    def test_applied_and_checked_keys_are_not_reported_as_gaps(self):
+        # The motion keys have appliers, the serial and format are checked
+        # before the ring is touched, and the lifecycle keys get a line of
+        # their own: none of them is an unrecorded decision.
+        header = {'STfr': 10000, 'AArd': 200, 'EFrd': 300, 'IFrd': 100,
+                  'MCsn': 0, 'PDfm': 0, 'CFrh': 1, 'CCwp': 5000,
+                  'CCrp': 10000, 'CCup': 1}
+        self.assertEqual(self.m._log_header_gaps(header), [])
+
+    def test_the_lifecycle_keys_are_logged_even_when_absent(self):
+        with self.assertLogs(machine_mod.logger, level='INFO') as caught:
+            self.m._log_header_gaps({'STfr': 10000})
+        line = [ln for ln in caught.output if 'job lifecycle keys' in ln]
+        self.assertEqual(len(line), 1, caught.output)
+        for key in machine_mod.LIFECYCLE_KEYS:
+            self.assertIn('%s=-' % key, line[0])

@@ -282,11 +282,36 @@ ForgeFIRM applies thirteen of them, and only those:
 Fan duties are honored on the scale the service uses: air assist 0 to 1023,
 exhaust and intake 0 to 65535.
 
-Everything else is dropped. Some of that is deliberate. Thermal policy belongs
-to the cooling engine, which runs its own coolant ceiling, flow verification,
-emission witness and silence timeout, and a machine should not let a remote
-service raise its own limits. The rest is not deliberate, and the specifics are
-in the outstanding items below.
+Everything else is dropped, but no longer silently: every job logs how many of
+its header keys have no applier here, and names them with their values at debug
+level. A key the machine does not act on is a decision, and a decision that
+leaves no trace is indistinguishable from an oversight, so each job is now also
+its own record of what the service asked for and this machine ignored.
+
+Some of the dropping is deliberate. Thermal policy belongs to the cooling
+engine, which runs its own coolant ceiling, flow verification, emission witness
+and silence timeout, and a machine should not let a remote service raise its own
+limits. The rest is not deliberate, and the specifics are in the outstanding
+items below.
+
+## A print's warm-up and its rest
+
+The factory holds twice around a print, and until now ForgeFIRM held neither.
+Measured on this board's own factory slot: **3.05 s** between configuring the
+run and starting it, and about **10.35 s** of rest after the park before the
+machine goes idle. A motion or a hunt gets neither, then or now.
+
+Both are equipment protection rather than ceremony. The warm-up is what gets
+air and coolant moving before the first fire; the rest is what purges the
+enclosure and the tube after the last one. The service assumes both have
+happened, so a machine that skips them is running hardware nobody looked
+after.
+
+`MOTION.WARM_UP_DELAY` and `MOTION.COOL_DOWN_DELAY` carry the seconds and
+default to the factory's measurements. 0 skips either, deliberately, and a
+skipped period says so in the log rather than passing in silence: a machine
+whose config was seeded from the older sample carries explicit zeros and will
+keep them until someone changes them.
 
 ## Firmware-update policy
 
@@ -402,12 +427,23 @@ ForgeFIRM **never downloads or installs factory firmware.**
   limit that service can raise, so the shape to aim for is a header value that
   can only tighten a locally configured ceiling, never loosen it.
 
-- **Pause constants from the job:** the pulse header's `CCbp` / `CCbt` keys
-  are the likely factory source of the backtrack and resume-lead counts; once
-  a captured header confirms it, prefer them over the `forgefirm.conf` values.
-  The `CC` family is header-only (it carries the job rather than the machine's
-  configuration) and its sources are unnamed in the factory firmware, so the
-  meanings have to come from observation rather than from reading.
+- ~~**Pause constants from the job:**~~ **refuted.** `CCbp` and `CCbt` were
+  read as the factory source of the backtrack and resume-lead counts. The
+  factory's own tag table says otherwise: both carry flags `0x01`, which is
+  not the pulse-legal bit, so neither can appear in a pulse header at all, and
+  `CCbp` sits in the periodic-settings set beside the state and X/Y position
+  tags. They are reported progress, not job parameters. The `forgefirm.conf`
+  values stand.
+- **The job's own lifecycle periods:** `CCwp` and `CCrp` carry 5000 and 10000
+  in every captured print header and nothing at all in a motion or a hunt,
+  which reads as the warm-up and rest periods in milliseconds, alongside
+  `CFrh` for the park and `CCup`, whose meaning is unknown. That is
+  correlation and naming rather than a decode, so nothing is driven off them
+  yet: the periods come from the config, defaulted to what the factory was
+  measured doing, and all four keys are named in the log of every job so a
+  capture that breaks the correlation is recognizable when it turns up. What
+  would settle it: a print with `CFrh = 0`, a motion with `CFrh = 1`, or the
+  consumer located in the factory binary.
 - **Coolant control per job:** the forgectrl cooling engine holds the pump
   on as part of its idle posture; the `WPon` pulse-header key has no
   applier — if per-job pump control is ever wanted, it belongs in the

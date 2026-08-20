@@ -84,6 +84,31 @@ FEED_STALL_S = 30.0        # no progress, with room to write, is a stalled feed
 FEED_RECOVER_S = 60.0      # how long a held job waits for the feed to move
 FEED_MAX_HOLDS = 3         # a feed that keeps stalling is sawing the material
 
+# A print's warm-up and its rest, in seconds. The factory does both and this
+# machine did neither: measured on this board's own factory slot, a print
+# holds 3.05 s between configuring the run and starting it, and rests about
+# 10.35 s after its park before it goes idle. That is equipment protection,
+# not ceremony - the warm-up is what gets air and coolant moving before the
+# first fire, and the rest is what purges the enclosure and the tube after
+# the last one - and the service assumes both have happened. The pulse header
+# carries candidates for the two periods (CCwp, CCrp), but their meaning is
+# correlation and naming rather than a decode, so the numbers come from the
+# config with the factory's measurements as the default.
+WARM_UP_DEFAULT_S = 3.0
+COOL_DOWN_DEFAULT_S = 10.0
+
+# Header keys that speak to a job's lifecycle rather than to its motion:
+# a park flag and the two periods above, plus one print-only flag whose
+# meaning is unknown. Nothing drives behavior off them yet; they are named
+# in the log of every job so a capture that breaks the correlation can be
+# recognized when it turns up.
+LIFECYCLE_KEYS = ('CFrh', 'CCwp', 'CCrp', 'CCup')
+
+# Header keys this client acts on outside the settings table: the serial the
+# job is locked to and the pulse-data format, both checked before a byte
+# reaches the ring.
+HEADER_CHECKED_KEYS = ('MCsn', 'PDfm')
+
 
 def _conf_float(key: str, default: float) -> float:
     try:
@@ -392,6 +417,7 @@ class Machine(BaseMachine):
             return
         self._motion_stats = stats
         logger.info('motion header: %s' % self._motion_stats['header_data'])
+        self._log_header_gaps(self._motion_stats['header_data'])
         # Fill the ring before the operator is asked for the button, so a job
         # that cannot be loaded fails before the laser is ever armed.
         self._feeder = PulseFeeder(source, pulse_dev)
@@ -429,8 +455,7 @@ class Machine(BaseMachine):
             self._config_from_pulse('run', self._motion_stats['header_data'])
             cooling_svc.set_mode('run')
             if msg['action_type'] == 'print':
-                if get_cfg('MOTION.WARM_UP_DELAY'):
-                    sleep(int(get_cfg('MOTION.WARM_UP_DELAY')))
+                self._dwell('warm_up')
 
         # Run motion job. Only a print pauses on the button (the factory's
         # print handler is the one that acts on the press); a motion or a
@@ -484,8 +509,7 @@ class Machine(BaseMachine):
             logger.info('start cool down')
             self._config_from_pulse('cool_down', self._motion_stats['header_data'])
             cooling_svc.set_mode('cooldown')
-            if get_cfg('MOTION.COOL_DOWN_DELAY'):
-                sleep(int(get_cfg('MOTION.COOL_DOWN_DELAY')))
+            self._dwell('cool_down')
             logger.info('end cool-down temps: %s' % str(temp_sensor.all))
 
         # Config for idle
@@ -529,6 +553,61 @@ class Machine(BaseMachine):
             return
         logger.info('return home complete')
         send_wss_event(self._q_msg_tx, self.running_action_id, 'print:return_to_home:succeeded')
+
+    @staticmethod
+    def _dwell(phase: str) -> float:
+        """Hold before a print's first fire, or after its last.
+
+        ``phase`` is 'warm_up' or 'cool_down'. Returns the seconds waited, so
+        a caller can log what a job actually spent. Configurable to zero for
+        anyone who wants the machine to skip it, which is how it shipped
+        before the factory's own timings were measured.
+        """
+        keys = {'warm_up': ('MOTION.WARM_UP_DELAY', WARM_UP_DEFAULT_S),
+                'cool_down': ('MOTION.COOL_DOWN_DELAY', COOL_DOWN_DEFAULT_S)}
+        key, default = keys[phase]
+        setting = get_cfg(key)
+        try:
+            seconds = default if setting is None else float(setting)
+        except (TypeError, ValueError):
+            logger.warning('%s is not a number (%r); holding %.1f s',
+                           key, setting, default)
+            seconds = default
+        if seconds <= 0:
+            # Worth a line rather than silence: a machine whose config still
+            # carries the zeros the old sample shipped skips a period the
+            # service assumes it took, and the log is where that shows.
+            logger.info('%s: skipped (%s = %r)', phase.replace('_', ' '),
+                        key, setting)
+            return 0.0
+        logger.info('%s: holding %.1f s', phase.replace('_', ' '), seconds)
+        sleep(seconds)
+        return seconds
+
+    @staticmethod
+    def _log_header_gaps(header: dict) -> list:
+        """Name what the job asked for that this machine does not act on.
+
+        The factory takes a whole operating envelope from the pulse header;
+        this client applies the motion keys and the three run fan duties, and
+        the rest went by unremarked. Unremarked is the problem: a header key
+        with no applier is a decision, and it should be a recorded one.
+        Returns the unhandled keys, sorted.
+        """
+        applied = {k for k, s in MACHINE_SETTINGS.items()
+                   if s.idle or s.run or s.cool_down}
+        known = applied.union(HEADER_CHECKED_KEYS, LIFECYCLE_KEYS)
+        logger.info('job lifecycle keys: %s',
+                    ' '.join('%s=%s' % (k, header.get(k, '-')) for k in LIFECYCLE_KEYS))
+        gaps = sorted(k for k in header if k not in known)
+        if gaps:
+            logger.info('%d of %d header keys have no applier here',
+                        len(gaps), len(header))
+            # Every job is then its own capture of what the service sends and
+            # this machine ignores, which is what the disposition work needs.
+            logger.debug('header keys with no applier: %s',
+                         ' '.join('%s=%s' % (k, header[k]) for k in gaps))
+        return gaps
 
     def _retrace(self, backtrack: int) -> tuple:
         """Walk back over ground the job already cut, with the laser off.
