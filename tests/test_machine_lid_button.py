@@ -322,7 +322,12 @@ def _install_fakes():
     cam_mod = types.ModuleType('gfhardware.cam')
     cam_mod.GFCAM_HEAD = 0
     cam_mod.GFCAM_LID = 1
-    cam_mod.capture = lambda *a, **k: b''
+    cam_mod.captures = []
+
+    def _capture(cam_sel=1, **kw):
+        cam_mod.captures.append((cam_sel, kw))
+        return b''
+    cam_mod.capture = _capture
 
     id_mod = types.ModuleType('gfhardware.id')
     id_mod.serial = lambda: 'XXX-000'
@@ -334,10 +339,10 @@ def _install_fakes():
                       ('gfhardware.coolsvc', coolsvc_mod), ('gfhardware.z_axis', z_mod),
                       ('gfhardware.cam', cam_mod), ('gfhardware.id', id_mod)):
         sys.modules[name] = mod
-    return cnc_mod.cnc, fake_sw, coolsvc_mod.cooling_svc, leds_mod
+    return cnc_mod.cnc, fake_sw, coolsvc_mod.cooling_svc, leds_mod, cam_mod
 
 
-CNC, SW, COOL, LEDS = _install_fakes()
+CNC, SW, COOL, LEDS, CAM = _install_fakes()
 
 import gfhardware.machine as machine_mod          # noqa: E402
 from gfhardware.machine import Machine             # noqa: E402
@@ -349,6 +354,8 @@ machine_mod.read_file = lambda attr, binary=False: 'hw_id=0x4c\nserial=1\nversio
 EVENTS = []
 machine_mod.send_wss_event = lambda q, action_id, event: EVENTS.append(event)
 machine_mod.generate_linear_puls = lambda x, y, dev: None
+UPLOADS = []
+machine_mod.img_upload = lambda session, img, msg: UPLOADS.append(msg['id'])
 
 
 def job_events():
@@ -894,6 +901,44 @@ class JobLifecycleTests(unittest.TestCase):
         self.assertEqual(len(line), 1, caught.output)
         for key in machine_mod.LIFECYCLE_KEYS:
             self.assertIn('%s=-' % key, line[0])
+
+
+class LidLampTests(unittest.TestCase):
+    """A lid capture lights the bed unless the action asks it not to."""
+
+    def setUp(self):
+        CNC.__init__()
+        SW.__init__()
+        COOL.__init__()
+        del CAM.captures[:]
+        del UPLOADS[:]
+        self.m = make_machine()
+
+    def lamp(self):
+        self.assertEqual(len(CAM.captures), 1, CAM.captures)
+        cam_sel, kw = CAM.captures[0]
+        self.assertEqual(cam_sel, machine_mod.cam.GFCAM_LID)
+        return kw.get('illumination')
+
+    def test_a_capture_with_no_settings_lights_the_lamp(self):
+        self.m._lid_image({'id': 1})
+        self.assertEqual(self.lamp(), 132)
+
+    def test_the_service_can_ask_for_the_flash(self):
+        self.m._lid_image({'id': 2}, {'LCfl': 1})
+        self.assertEqual(self.lamp(), 132)
+
+    def test_the_service_can_ask_for_the_bed_as_it_is_lit(self):
+        self.m._lid_image({'id': 3}, {'LCfl': 0})
+        self.assertEqual(self.lamp(), 0)
+
+    def test_settings_that_say_nothing_about_the_flash_leave_it_on(self):
+        self.m._lid_image({'id': 4}, {'HCil': 3})
+        self.assertEqual(self.lamp(), 132)
+
+    def test_the_image_still_goes_out(self):
+        self.m._lid_image({'id': 5}, {'LCfl': 0})
+        self.assertEqual(UPLOADS, [5])
 
 
 class ProgressTests(unittest.TestCase):

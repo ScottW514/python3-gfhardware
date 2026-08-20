@@ -200,16 +200,17 @@ def build_machine():
                           'wb') as f:
                     f.write(img)
 
-        def _lid_image(self, msg: dict) -> None:
-            logger.info('capturing Lid Image via forgectrl')
+        def _lid_image(self, msg: dict, settings: dict = None) -> None:
+            lamp = self.lamp_level(settings)
+            logger.info('capturing Lid Image via forgectrl (lamp %d)', lamp)
             try:
-                img = self._snapshot('lid')
+                img = self._snapshot('lid', lamp=lamp)
             except LidOpen as e:
                 logger.warning('lid image refused: %s', e)
                 raise
             except Exception:
                 logger.exception('forgectrl snapshot failed; direct capture')
-                return super()._lid_image(msg)
+                return super()._lid_image(msg, settings)
             logger.info('uploading Lid Image')
             img_upload(self._session, img, msg)
             self._save_sent(img, msg)

@@ -439,9 +439,14 @@ class Machine(BaseMachine):
         set_button_color(ButtonColor.OFF)
         cnc.enable()
 
-    def _lid_image(self, msg: dict) -> None:
-        logger.info('capturing Lid Image')
-        img = cam.capture(cam.GFCAM_LID)
+    def _lid_image(self, msg: dict, settings: dict = None) -> None:
+        # The flash is the service's to ask for, per shot, and a lid image is
+        # the one capture it asks about: LCfl 0 means photograph the bed as it
+        # is lit. Absent, the lamp comes on, which is what every capture did
+        # before the key was honored.
+        lamp = self.lamp_level(settings)
+        logger.info('capturing Lid Image (lamp %d)', lamp)
+        img = cam.capture(cam.GFCAM_LID, illumination=lamp)
         logger.info('uploading Lid Image')
         img_upload(self._session, img, msg)
         if get_cfg('LOGGING.SAVE_SENT_IMAGES'):

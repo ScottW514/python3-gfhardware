@@ -490,7 +490,21 @@ ForgeFIRM **never downloads or installs factory firmware.**
   fields the factory requires are read and discarded. None of them can put
   energy anywhere (the hardware chain is the emission boundary and the header
   never touches it), but each one the factory arms per job is a failure mode it
-  watches and ForgeFIRM does not:
+  watches and ForgeFIRM does not.
+
+  The whole header has now been swept rather than sampled, so the size of this
+  is known. Of the 346 tags a pulse header may carry, ForgeFIRM applies 13,
+  refuses the file on 2, and names 4 in the job log. The factory binds 283 of
+  them to a source and applies them generically, and four have no consumer
+  anywhere in the factory either. That leaves 270 tags bound there and not
+  applied here, which sounds like a mountain and is not: 20 configure the
+  client's own network backoff, where ForgeFIRM has its own policy; 39 belong
+  to the three fans of an air filter most machines do not have; the camera
+  families are the exposure and gain values deliberately not applied because
+  the mainline driver's units differ; and 42 accelerometer and 54 temperature
+  entries are mostly per-phase idle and warm-up variants of the same few
+  limits. What actually matters is the list below, and it is the reason this
+  item exists:
   - `AArn`/`AArx`, `EFrn`/`EFrx`, `IFrn`/`IFrx` are the run-phase tach windows
     for air assist, exhaust and intake. ForgeFIRM reads every tach for the
     dashboard and gates on none of them, so a fan that stalls mid-cut goes
