@@ -107,8 +107,8 @@ Parser note: an event's `<action>` prefix segment can be empty — never assume
 
 ## Actions
 
-All eleven `action_type` values in the 2.6.0 vocabulary are handled through a
-single dispatch table shared by `gfcloud` and `gfhome`:
+The 2.6.0 vocabulary is twelve `action_type` values, and they are handled
+through a single dispatch table shared by `gfcloud` and `gfhome`:
 
 | action_type | Behavior |
 |---|---|
@@ -119,10 +119,44 @@ single dispatch table shared by `gfcloud` and `gfhome`:
 | `lid_image` | Lid-camera capture + upload. |
 | `head_image` | Head-camera capture + upload. |
 | `lidar_image` | Head captures with the distance-measuring laser (per-shot settings arrive as a list). |
-| `user_image` | User-requested snapshot; defaults to the lid/bed view. |
-| `factory_reset` | Acknowledged as `factory_reset:cancelled` and **never acted on** — a cloud command must not wipe a ForgeFIRM machine. |
-| `update_check` | Acknowledged (`firmware_update:check:starting`/`:completed` + `:skipping`); see the firmware policy below. |
+| `user_image` | User-requested snapshot: a lid-camera capture, lid closed. Same as `lid_image` in the factory too, name apart. |
+| `factory_reset` | Refused with `factory_reset:failed` and **never acted on** - a cloud command must not wipe a ForgeFIRM machine. |
+| `update_check` | Answered with `update_check:completed`; see the firmware policy below. |
+| `head_firmware_update` | Refused with `head_firmware_update:failed` - a cloud command does not flash the laser head. |
+| `focus` | Ignored, as the factory application ignores it: its own dispatch has no case for the name. |
 | unknown | Ignored. |
+
+Only a `ready` status is a request to do anything. The three answered on the
+protocol thread (`settings`, `update_check`, `factory_reset`,
+`head_firmware_update`) act on `ready` alone: the service also sends a
+`cancelled` for actions a machine never received, and the factory ignores
+those rather than answering them. The job actions are deliberately not gated
+that way, because a `cancelled` is how a print in flight is stopped.
+
+### What the three unprompted actions do in the factory
+
+None of these has ever been seen on the wire here, so they were read out of
+the 2.6.0 binary rather than observed. All three turn out to be hand-offs to
+programs ForgeFIRM does not have:
+
+- **`update_check` checks nothing.** The handler writes `'u'` to the runit
+  control fifo `/var/run/svs/glowforge-updater/control` and reports
+  `:completed`, or `:failed` if that write fails; on a service-sent failure or
+  cancel it writes `'d'` to stop the service again. Everything an update means
+  happens in that separate daemon. The application carries no update endpoint
+  at all, and a cut refuses to start while the updater holds its lock.
+- **`factory_reset` replaces the application with a script.** The action posts
+  a command to the hardware task, which tells runit not to restart the
+  application and then `execl`s `/usr/bin/factory_reset.sh`, passing `reboot`
+  when the request's flag asks for one.
+- **`head_firmware_update` flashes the laser head.** It takes
+  `head_firmware_filename` from the request, reads it out of
+  `/glowforge/fw/head/` and runs `/usr/bin/head-update.sh`.
+
+The two refusals report `:failed` rather than `:cancelled` on purpose. In this
+protocol a cancel is what the service says when it withdraws an action;
+failure is what a machine says when the thing did not happen, and it is the
+factory's own report when its reset script cannot be launched.
 
 ### Per-action settings
 
@@ -384,9 +418,11 @@ keep them until someone changes them.
 
 ForgeFIRM **never downloads or installs factory firmware.**
 
-- The `update_check` action is acknowledged with
-  `firmware_update:check:starting` / `:completed` / `:skipping` — never the
-  `:download`/`:apply`/`:commit`/`:reboot` events.
+- The `update_check` action is answered with `update_check:completed`, which
+  is what a factory machine sends once it has started its updater, without
+  the hand-off that would install a factory image over ForgeFIRM. A version
+  probe that fails answers `update_check:failed`, the one honest failure
+  here: the check itself did not happen.
 - On connect (when `FACTORY_FIRMWARE.CHECK` is set) a read-only
   `GET /update/current` probe records
   `{latest_gf_version, tested_against_gf, checked_at}` to
@@ -400,6 +436,10 @@ ForgeFIRM **never downloads or installs factory firmware.**
   `MCov` and was tested against. There is no separate release-side field:
   the value travels config → `gf-latest.json` → forgectrl's status (`gfsvc`)
   → the panel banner.
+- One caveat on that probe: `/update/current` is inherited from the 1.x-era
+  client and appears nowhere in the 2.6.0 application, which reaches its
+  updater through the service action instead. The endpoint answering is an
+  assumption, not something the current factory firmware demonstrates.
 
 ## Configuration
 
@@ -421,10 +461,14 @@ ForgeFIRM **never downloads or installs factory firmware.**
   transfer-phase frames (`<action>:download`, `<action>:upload`, position
   only, no total) are not sent at all, since the `:starting` event already
   says the same thing.
-- **Unobserved actions:** the live service has not been seen issuing
-  `update_check`, `user_image`, or `factory_reset`; their exact expected
-  payloads/acks are unconfirmed (current handlers are deliberate defaults —
-  capture and adjust when first observed).
+- ~~**Unobserved actions:**~~ **settled from the firmware**, since the live
+  service has never been seen issuing `update_check`, `user_image`,
+  `factory_reset` or `head_firmware_update` and there is no way to ask it to.
+  All four are decoded above: `user_image` is a lid capture and is
+  implemented; the other three hand off to programs this machine does not
+  have and are answered rather than performed. What is still unknown is
+  small and does not change any of that: what the service does with each
+  answer, and whether a refused `factory_reset` is retried.
 - **A live job longer than the ring:** the feed is built and covered by host
   tests, and `cloud.oversize-stream` is written for it, but no job the ring
   cannot hold has yet been run from the live service.
