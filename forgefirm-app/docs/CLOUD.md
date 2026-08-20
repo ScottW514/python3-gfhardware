@@ -207,17 +207,26 @@ the storage backend reject it). Without `endpoint`, the legacy
   - **the button pauses and resumes a print**: press → controlled stop, then
     `cloud_pause_backtrack_ticks` (default 2000) ticks backward with the laser
     off, `print:paused`; press again → forward with the laser re-enabled after
-    `cloud_resume_lead_ticks` (default 1950), `print:resumed`. The laser latch
-    stays unlocked and the armed window open through the pause (HV_ENABLE drops
-    by itself when the stream stops, and the resume lead covers its re-arm);
-    lid, interlock or a service cancel while paused cancel the job from where
-    it stands. Motions and hunts do not pause. Both tick counts are
-    `forgefirm.conf` keys.
+    `cloud_resume_lead_ticks` (default 1950), `print:resumed`. What the two
+    counts really say is that the beam comes back on 50 ticks before the point
+    the pause stopped at, over ground the job already cut, and that is the
+    invariant the client keeps: the retrace is sized to `cnc/max_backtrack`,
+    the history the ring still holds, and the lead follows it down. A pause in
+    a print's first moments therefore retraces a little and leads a little,
+    rather than failing; a live-fed print pauses exactly like a preloaded one,
+    because the ring's retained gap is history whether the job was preloaded
+    or is being fed. The laser latch stays unlocked and the armed window open
+    through the pause (HV_ENABLE drops by itself when the stream stops, and the
+    resume lead covers its re-arm); lid, interlock or a service cancel while
+    paused cancel the job from where it stands. Motions and hunts do not pause.
+    Both tick counts are `forgefirm.conf` keys.
 - Post-action cleanup always locks the laser latch and drops the pulse-device
   registration — including when an action crashes.
-- A job larger than the ring is rejected cleanly ("job exceeds the device
-  ring") and the action safe-aborts. The whole job is buffered before running,
-  so the ring size caps job length.
+- A job larger than the ring runs anyway: the client holds the compressed body
+  in memory, fills the ring before the button is asked for, and tops it up as
+  it drains, so the ring is a window onto the job rather than the place the job
+  lives. The ring size caps how much of a job is buffered at once (~56 min at
+  the print tick), not how long a job may be.
 
 ### The pulse header
 

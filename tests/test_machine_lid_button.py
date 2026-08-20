@@ -69,6 +69,10 @@ class FakeCNC:
         self.processed = 100
         self.total = 1000
         self.latch = 1
+        # Steps of played, still-resident program a backward run can walk.
+        # Plenty, unless a test says otherwise.
+        self.backtrack_budget = 10 ** 6
+        self.max_backtrack_error = None
         self.resume_error = None
         self.clear_error = None
         self.xy_steps = (10, 10)
@@ -134,6 +138,12 @@ class FakeCNC:
                 self._state = MachineState.IDLE
                 self.processed = self.total
         return self._state
+
+    @property
+    def max_backtrack(self):
+        if self.max_backtrack_error is not None:
+            raise self.max_backtrack_error
+        return self.backtrack_budget
 
     @property
     def position(self):
@@ -500,8 +510,11 @@ class RunLoopTests(unittest.TestCase):
         self.assertEqual(job_events(), [])
 
     def test_backtrack_refused_pauses_in_place(self):
-        # The kernel refuses the backtrack (e.g. a streamed ring): the job
-        # holds where the decel stopped, still paused, still resumable.
+        # The kernel refuses the backtrack: the job holds where the decel
+        # stopped, still paused, still resumable - and the resume asks for
+        # the shortest lead there is, because nothing was retraced. A lead
+        # over ground the job has not cut yet would leave that length
+        # unburned, and a lead of zero is the kernel's "no laser at all".
         SW.press(delay=0.05)
         SW.press(delay=0.40)
         threading.Timer(0.6, lambda: setattr(CNC, '_reads_left', 1)).start()
@@ -518,6 +531,49 @@ class RunLoopTests(unittest.TestCase):
             del CNC.resume
         self.assertFalse(aborted)
         self.assertEqual(job_events(), ['print:paused', 'print:resumed'])
+        self.assertIn(('resume', 1), CNC.writes)
+        self.assertNotIn(('resume', 1950), CNC.writes)
+        self.assertNotIn(('resume', 0), CNC.writes)
+
+    def test_short_history_shortens_the_retrace_and_the_lead(self):
+        # A pause early in a program, or on a ring a live feed has just
+        # topped up, has less than the factory distance to walk back over.
+        # The retrace shortens to what is there and the lead follows it,
+        # keeping the 50-tick overlap the factory constants describe.
+        CNC.backtrack_budget = 500
+        SW.press(delay=0.05)
+        SW.press(delay=0.40)
+        threading.Timer(0.6, lambda: setattr(CNC, '_reads_left', 1)).start()
+        aborted = self.m._run_loop(pausable=True)
+        self.assertFalse(aborted)
+        self.assertIn(('resume', -500), CNC.writes)
+        self.assertIn(('resume', 450), CNC.writes)
+        self.assertEqual(job_events(), ['print:paused', 'print:resumed'])
+
+    def test_no_history_holds_and_resumes_lit(self):
+        # Nothing to walk back over: no backward run is asked for at all,
+        # and the resume puts the beam back on where it stopped.
+        CNC.backtrack_budget = 0
+        SW.press(delay=0.05)
+        SW.press(delay=0.40)
+        threading.Timer(0.6, lambda: setattr(CNC, '_reads_left', 1)).start()
+        aborted = self.m._run_loop(pausable=True)
+        self.assertFalse(aborted)
+        self.assertFalse([w for w in CNC.writes if w[0] == 'resume' and w[1] < 0])
+        self.assertIn(('resume', 1), CNC.writes)
+        self.assertNotIn(('resume', 0), CNC.writes)
+        self.assertEqual(job_events(), ['print:paused', 'print:resumed'])
+
+    def test_unreadable_budget_asks_for_the_configured_distance(self):
+        # No readback (an older module): ask for the factory distance and
+        # let the kernel be the one to refuse it.
+        CNC.max_backtrack_error = OSError(2, 'ENOENT')
+        SW.press(delay=0.05)
+        SW.press(delay=0.40)
+        threading.Timer(0.6, lambda: setattr(CNC, '_reads_left', 1)).start()
+        aborted = self.m._run_loop(pausable=True)
+        self.assertFalse(aborted)
+        self.assertIn(('resume', -2000), CNC.writes)
         self.assertIn(('resume', 1950), CNC.writes)
 
 

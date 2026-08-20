@@ -266,6 +266,18 @@ class _CNC(object):
         return int(read_file(SYSFS_GF_BASE + 'cnc/free'))
 
     @property
+    def max_backtrack(self) -> int:
+        """Steps a backward run may be asked for right now.
+
+        What the ring still holds of what it has already played, less the
+        deceleration tail. A pause sizes both its backtrack and the resume's
+        laser-on lead from this: the kernel refuses a longer request rather
+        than quietly running a shorter one. Costs SDMA transactions, so read
+        it once per pause, not in a loop.
+        """
+        return int(read_file(SYSFS_GF_BASE + 'cnc/max_backtrack'))
+
+    @property
     def step_freq(self) -> int:
         return int(read_file(SYSFS_GF_BASE + 'cnc/step_freq'))
 

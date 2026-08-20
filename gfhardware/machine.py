@@ -512,9 +512,13 @@ class Machine(BaseMachine):
           - cooling verdict pulled: latch relocked, the same stop;
           - button press (prints only): pause - stop, backtrack
             cloud_pause_backtrack_ticks with the laser off, hold; the
-            next press resumes - forward with the laser re-enabled after
-            cloud_resume_lead_ticks. Lid/interlock/cancel while paused
-            cancel the job from where it stands.
+            next press resumes - forward, with the laser re-enabled
+            cloud_pause_backtrack_ticks minus cloud_resume_lead_ticks
+            short of the pause point, so the beam returns over ground
+            the job already cut. A pause in a program's first moments
+            retraces as far as the ring holds and leads by the same
+            amount less. Lid/interlock/cancel while paused cancel the
+            job from where it stands.
         The switch thread wakes this loop on every edge, so a reaction
         lands within milliseconds; the level read each pass is the
         backstop for an edge the thread missed.
@@ -534,6 +538,13 @@ class Machine(BaseMachine):
         logger.info('current state: %s' % cnc.state)
         backtrack = int(_conf_float('cloud_pause_backtrack_ticks', 2000))
         lead = int(_conf_float('cloud_resume_lead_ticks', 1950))
+        # The factory's two constants say one thing: come back on this many
+        # ticks before the point the pause stopped at. Keeping the overlap
+        # rather than the lead is what lets a short retrace stay correct - a
+        # lead longer than the ground retraced would put the beam back on
+        # past the pause point, leaving the cut unburned there.
+        overlap = max(0, backtrack - lead)
+        retraced = 0
         aborted = False
         paused = False
         while True:
@@ -596,10 +607,15 @@ class Machine(BaseMachine):
             if pausable and self._button_edges:
                 self._button_edges = 0
                 if paused:
+                    # Never zero: a zero lead is the kernel's "forward without
+                    # re-enabling the laser", which would finish the job dark.
+                    # With nothing retraced the beam comes straight back on,
+                    # which marks the resume point but cuts the material.
+                    resume_lead = max(1, retraced - overlap)
                     logger.info('button pressed while paused; resuming '
-                                '(laser lead %d ticks)', lead)
+                                '(laser lead %d ticks)', resume_lead)
                     try:
-                        cnc.resume(lead)
+                        cnc.resume(resume_lead)
                     except OSError as e:
                         logger.error('resume refused (%s); cancelling', e)
                         self._running_action_cancelled = True
@@ -619,12 +635,28 @@ class Machine(BaseMachine):
                 pos = cnc.position
                 if pos.bytes.processed >= pos.bytes.total:
                     break                   # the decel ended the program: done
-                if backtrack > 0:
+                # How far back the ring can still be walked is a property of
+                # the ring: a live-fed job keeps the writer's retained gap of
+                # history, and only a pause in the program's first moments
+                # has less than the factory distance to give.
+                try:
+                    budget = max(0, cnc.max_backtrack)
+                except (OSError, ValueError):
+                    # No readback: ask for the configured distance and let
+                    # the kernel refuse it if the history is short.
+                    budget = backtrack
+                retraced = min(backtrack, budget)
+                if retraced < backtrack:
+                    logger.info('retracing %d ticks of the %d asked for; that '
+                                'is what the ring still holds', retraced, backtrack)
+                if retraced > 0:
                     try:
-                        cnc.resume(-backtrack)
+                        cnc.resume(-retraced)
                     except OSError as e:
-                        # Not fatal: hold where the decel stopped.
+                        # Not fatal: hold where the decel stopped, and the
+                        # resume then leads with the laser on from the start.
                         logger.warning('backtrack refused (%s); pausing in place', e)
+                        retraced = 0
                     else:
                         if not self._wait_kernel_idle():
                             break
