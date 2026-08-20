@@ -14,7 +14,8 @@ from typing import Union
 from gfutilities import BaseMachine
 from gfutilities.configuration import get_cfg, set_cfg
 from gfutilities.puls import generate_linear_puls
-from gfutilities.service.websocket import (fetch_motion, load_motion, img_upload,
+from gfutilities.service.websocket import (PULSE_REJECT_BYTES, PULSE_WARN_BYTES,
+                                           fetch_motion, img_upload,
                                            motion_run_time, send_wss_event)
 from gfutilities.device.settings import MACHINE_SETTINGS, update_settings
 
@@ -22,7 +23,7 @@ from gfhardware import id
 from gfhardware._common import *
 from gfhardware.cnc import *
 from gfhardware.cooling import *
-from gfhardware.feeder import PulseFeeder
+from gfhardware.feeder import CHUNK as FEED_CHUNK, PulseFeeder
 from gfhardware.coolsvc import cooling_svc
 from gfhardware.leds import *
 from gfhardware.switches import *
@@ -41,6 +42,20 @@ logger = logging.getLogger(LOGGER_NAME)
 _pulse_stream = None
 
 
+def _ring_has_room() -> bool:
+    """Whether the ring could take another chunk right now.
+
+    What tells a stalled feed apart from a full ring: a feeder with nothing
+    to do because the window is full is healthy, and the same feeder with
+    room in front of it and no progress behind it is not. Fails closed, so
+    an unreadable ring never trips the watchdog.
+    """
+    try:
+        return cnc.free > FEED_CHUNK
+    except (OSError, ValueError):
+        return False
+
+
 def _inherited_pulse_dev():
     global _pulse_stream
     fd = os.getenv('GF_PULSE_FD')
@@ -55,6 +70,19 @@ def _inherited_pulse_dev():
 # GRBL controller and forgectrl read, so both controller modes honor
 # the same operator-facing tunables.
 MACHINE_CONF = os.environ.get('GFHOME_CONF', '/data/forgefirm.conf')
+
+# Feed watchdog. A live-fed run whose feeder stops making progress while the
+# ring has room for a chunk is a feed that has wedged. Left alone it ends the
+# same way every time: the ring plays out what it holds, tens of minutes at
+# the print tick, then goes dry, and a dry ring is an underrun - an instant
+# stop, a position no longer trusted, and a job that cannot be picked back up.
+# The watchdog stops the machine cleanly long before that and retraces the way
+# a pause does, so the feed has room to catch up and the seam is hidden if it
+# does. These are supervision timeouts rather than preferences, so they live
+# here rather than in the machine config.
+FEED_STALL_S = 30.0        # no progress, with room to write, is a stalled feed
+FEED_RECOVER_S = 60.0      # how long a held job waits for the feed to move
+FEED_MAX_HOLDS = 3         # a feed that keeps stalling is sawing the material
 
 
 def _conf_float(key: str, default: float) -> float:
@@ -312,8 +340,8 @@ class Machine(BaseMachine):
             # the lock arms the kernel dead man's switch on the open
             # file description, and every pulse write and seek routes
             # through the one fd (cnc.set_pulse_dev() points the seek
-            # helpers at it; load_motion/generate_linear_puls accept the
-            # open file). Broker mode reuses the inherited, never-closed
+            # helpers at it; the feeder and generate_linear_puls write to
+            # the open file). Broker mode reuses the inherited, never-closed
             # fd; standalone opens and closes per job, the close being
             # what fires the dead-man if this process dies mid-print.
             inherited = _inherited_pulse_dev()
@@ -344,13 +372,21 @@ class Machine(BaseMachine):
         # Download puls file from service. It stays in memory: the service
         # compresses the stream tens to one, so even a job hours long is a
         # few MB held, nothing written to the eMMC, and the ring is fed from
-        # it as it drains.
+        # it as it drains. Held in memory is why the size guards exist: they
+        # bound this process, not the length of a job (which the feed no
+        # longer caps). Both are forgefirm.conf keys; 0 lifts either.
         logger.info('loading motion file from %s' % msg['motion_url'])
-        stats, source = fetch_motion(self._session, msg['motion_url'])
+        stats, source = fetch_motion(
+            self._session, msg['motion_url'],
+            warn_bytes=max(0, int(_conf_float('pulse_warn_threshold_bytes',
+                                              PULSE_WARN_BYTES))),
+            reject_bytes=max(0, int(_conf_float('pulse_reject_threshold_bytes',
+                                                PULSE_REJECT_BYTES))))
         if not stats:
-            # Rejected before anything reached the ring (bad magic, short
-            # or unusable header): cancel cleanly instead of subscripting
-            # False.
+            # Rejected before anything reached the ring (bad magic, a short
+            # or unusable header, or more body than this machine will hold;
+            # the reason is logged where it was found): cancel cleanly
+            # instead of subscripting False.
             logger.error('motion file rejected; cancelling the action')
             self._running_action_cancelled = True
             return
@@ -418,6 +454,13 @@ class Machine(BaseMachine):
             self._motion_stats['stats'] = self._feeder.stats
             self._motion_stats['run_time'] = motion_run_time(
                 self._motion_stats, self._feeder.written)
+            # What the service's compression actually bought, per job. This
+            # is the number the memory guards are sized against, so it is
+            # worth having in the log rather than inferred from a capture.
+            if source.body_size:
+                logger.info('pulse data: %d bytes of body, %d bytes of program (%.1f:1)',
+                            source.body_size, self._feeder.written,
+                            self._feeder.written / source.body_size)
             # The job's feed is over. The park that may follow writes its own
             # small program and must not inherit this one's state.
             self._feeder = None
@@ -487,6 +530,57 @@ class Machine(BaseMachine):
         logger.info('return home complete')
         send_wss_event(self._q_msg_tx, self.running_action_id, 'print:return_to_home:succeeded')
 
+    def _retrace(self, backtrack: int) -> tuple:
+        """Walk back over ground the job already cut, with the laser off.
+
+        Called with the machine stopped and idle, by the button pause and by
+        the feed watchdog alike. Returns ``(ok, retraced)``: ``ok`` is False
+        only if the kernel faulted, and ``retraced`` is the ticks actually
+        walked, which the ring's retained history bounds. A refusal is not
+        fatal - the job holds where the deceleration left it - but the resume
+        that follows has to lead by what was retraced rather than by what was
+        asked for.
+        """
+        try:
+            budget = max(0, cnc.max_backtrack)
+        except (OSError, ValueError):
+            # No readback: ask for the configured distance and let the kernel
+            # refuse it if the history is short.
+            budget = backtrack
+        retraced = min(backtrack, budget)
+        if retraced < backtrack:
+            logger.info('retracing %d ticks of the %d asked for; that is what '
+                        'the ring still holds', retraced, backtrack)
+        if retraced <= 0:
+            return True, 0
+        try:
+            cnc.resume(-retraced)
+        except OSError as e:
+            # Not fatal: hold where the decel stopped, and the resume then
+            # brings the laser back on from the start.
+            logger.warning('backtrack refused (%s); holding in place', e)
+            return True, 0
+        if not self._wait_kernel_idle():
+            return False, retraced
+        return True, retraced
+
+    def _resume_retraced(self, retraced: int, overlap: int) -> bool:
+        """Pick the program back up after a retraced hold.
+
+        The lead is what was retraced less the overlap, so the beam returns
+        over ground the job already cut. Never zero: zero is the kernel's
+        "forward without re-enabling the laser", which would finish the job
+        dark.
+        """
+        lead = max(1, retraced - overlap)
+        logger.info('resuming (laser lead %d ticks)', lead)
+        try:
+            cnc.resume(lead)
+        except OSError as e:
+            logger.error('resume refused (%s); cancelling', e)
+            return False
+        return True
+
     def _wait_kernel_idle(self, timeout_s: float = 10.0) -> bool:
         """After a stop or a backtrack: True once the kernel reports idle
         (the controlled decel has played out), False on timeout/fault."""
@@ -519,6 +613,11 @@ class Machine(BaseMachine):
             retraces as far as the ring holds and leads by the same
             amount less. Lid/interlock/cancel while paused cancel the
             job from where it stands.
+          - a live feed that stops making progress while the ring has
+            room for it: the same stop and retrace, held until the feed
+            moves again, and cancelled rather than left standing if it
+            does not. A dry ring is an underrun and a scrapped job; this
+            is the same job with a hidden seam.
         The switch thread wakes this loop on every edge, so a reaction
         lands within milliseconds; the level read each pass is the
         backstop for an edge the thread missed.
@@ -547,6 +646,14 @@ class Machine(BaseMachine):
         retraced = 0
         aborted = False
         paused = False
+        # Feed watchdog state: the last progress seen from the feeder and
+        # when, whether the job is being held for it, and how many times it
+        # has had to be.
+        feed_mark = self._feeder.written if self._feeder is not None else 0
+        feed_at = monotonic()
+        feed_held = False
+        feed_deadline = 0.0
+        feed_holds = 0
         while True:
             state = cnc.state
             if state is MachineState.UNDERRUN:
@@ -561,7 +668,7 @@ class Machine(BaseMachine):
                 self._running_action_cancelled = True
                 aborted = True
                 break
-            if state is not MachineState.RUNNING and not paused:
+            if state is not MachineState.RUNNING and not paused and not feed_held:
                 break                       # program ended, or the kernel faulted
             switches = self._sw_thread.all_switches()
             enclosure = self._enclosure_open(switches)
@@ -600,24 +707,79 @@ class Machine(BaseMachine):
                 self._running_action_cancelled = True
                 aborted = True
             if aborted:
-                if not paused:
+                if not paused and not feed_held:
                     cnc.stop()
                     self._wait_kernel_idle()
                 break
-            if pausable and self._button_edges:
+
+            # The feed watchdog. Only a live-fed job can starve: one that fit
+            # the ring is enqueued whole and has nothing left to wait for.
+            if self._feeder is not None and not self._feeder.finished:
+                now = monotonic()
+                moved = self._feeder.written != feed_mark
+                if moved:
+                    feed_mark, feed_at = self._feeder.written, now
+                if feed_held:
+                    if moved:
+                        logger.info('the pulse feed moved again after %d bytes; '
+                                    'resuming the job', self._feeder.written)
+                        if not self._resume_retraced(retraced, overlap):
+                            self._running_action_cancelled = True
+                            aborted = True
+                            break
+                        feed_held = False
+                        if pausable:
+                            send_wss_event(self._q_msg_tx, self.running_action_id,
+                                           'print:resumed')
+                        # Give the kernel a moment to leave idle before the
+                        # next pass reads the state.
+                        sleep(.05)
+                        continue
+                    if now > feed_deadline:
+                        logger.error('the pulse feed did not move in %.0f s of '
+                                     'waiting; cancelling the job', FEED_RECOVER_S)
+                        self._running_action_cancelled = True
+                        aborted = True
+                        break
+                elif not paused and now - feed_at > FEED_STALL_S and _ring_has_room():
+                    feed_holds += 1
+                    logger.error('the pulse feed has not moved in %.0f s with room '
+                                 'in the ring (%d bytes fed); stopping the job '
+                                 'before the ring runs dry', now - feed_at, feed_mark)
+                    if feed_holds > FEED_MAX_HOLDS:
+                        logger.error('the feed has stalled %d times this job; '
+                                     'cancelling rather than cutting it in pieces',
+                                     feed_holds)
+                        self._running_action_cancelled = True
+                        aborted = True
+                        cnc.stop()
+                        self._wait_kernel_idle()
+                        break
+                    cnc.stop()
+                    if not self._wait_kernel_idle():
+                        break               # fault: the state read above ends the loop
+                    pos = cnc.position
+                    if pos.bytes.processed >= pos.bytes.total:
+                        break               # the decel ended the program: done
+                    ok, retraced = self._retrace(backtrack)
+                    if not ok:
+                        break
+                    feed_held = True
+                    feed_deadline = monotonic() + FEED_RECOVER_S
+                    if pausable:
+                        send_wss_event(self._q_msg_tx, self.running_action_id,
+                                       'print:paused')
+                    logger.info('held at %s, waiting for the feed', cnc.position)
+                    continue
+
+            # A press while the job is held for the feed is not lost: it is
+            # left to be read once the job is moving again, where pausing is
+            # a thing the machine can actually do.
+            if pausable and self._button_edges and not feed_held:
                 self._button_edges = 0
                 if paused:
-                    # Never zero: a zero lead is the kernel's "forward without
-                    # re-enabling the laser", which would finish the job dark.
-                    # With nothing retraced the beam comes straight back on,
-                    # which marks the resume point but cuts the material.
-                    resume_lead = max(1, retraced - overlap)
-                    logger.info('button pressed while paused; resuming '
-                                '(laser lead %d ticks)', resume_lead)
-                    try:
-                        cnc.resume(resume_lead)
-                    except OSError as e:
-                        logger.error('resume refused (%s); cancelling', e)
+                    logger.info('button pressed while paused')
+                    if not self._resume_retraced(retraced, overlap):
                         self._running_action_cancelled = True
                         aborted = True
                         break
@@ -635,38 +797,17 @@ class Machine(BaseMachine):
                 pos = cnc.position
                 if pos.bytes.processed >= pos.bytes.total:
                     break                   # the decel ended the program: done
-                # How far back the ring can still be walked is a property of
-                # the ring: a live-fed job keeps the writer's retained gap of
-                # history, and only a pause in the program's first moments
-                # has less than the factory distance to give.
-                try:
-                    budget = max(0, cnc.max_backtrack)
-                except (OSError, ValueError):
-                    # No readback: ask for the configured distance and let
-                    # the kernel refuse it if the history is short.
-                    budget = backtrack
-                retraced = min(backtrack, budget)
-                if retraced < backtrack:
-                    logger.info('retracing %d ticks of the %d asked for; that '
-                                'is what the ring still holds', retraced, backtrack)
-                if retraced > 0:
-                    try:
-                        cnc.resume(-retraced)
-                    except OSError as e:
-                        # Not fatal: hold where the decel stopped, and the
-                        # resume then leads with the laser on from the start.
-                        logger.warning('backtrack refused (%s); pausing in place', e)
-                        retraced = 0
-                    else:
-                        if not self._wait_kernel_idle():
-                            break
+                ok, retraced = self._retrace(backtrack)
+                if not ok:
+                    break
                 paused = True
                 send_wss_event(self._q_msg_tx, self.running_action_id,
                                'print:paused')
                 logger.info('paused at %s', cnc.position)
                 continue
-            if paused and state not in (MachineState.IDLE, MachineState.RUNNING):
-                break                       # the kernel faulted while paused
+            if (paused or feed_held) and state not in (MachineState.IDLE,
+                                                       MachineState.RUNNING):
+                break                       # the kernel faulted while held
             self._run_wake.wait(.1)
             self._run_wake.clear()
         logger.info('current state: %s' % cnc.state)

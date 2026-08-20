@@ -66,9 +66,12 @@ class FakeCNC:
         self._reads_left = 0
         self.run_reads = 10 ** 9
         self.backtrack_reads = 3
+        self._backward = False
         self.processed = 100
         self.total = 1000
         self.latch = 1
+        # Ring room for the feed watchdog: plenty, unless a test says so.
+        self.free = 10 ** 7
         # Steps of played, still-resident program a backward run can walk.
         # Plenty, unless a test says otherwise.
         self.backtrack_budget = 10 ** 6
@@ -93,6 +96,7 @@ class FakeCNC:
     def run(self):
         self.writes.append(('run', 1))
         self._state = MachineState.RUNNING
+        self._backward = False
         self._reads_left = self.run_reads
 
     def stop(self):
@@ -104,6 +108,7 @@ class FakeCNC:
             raise self.resume_error
         self.writes.append(('resume', int(steps)))
         self._state = MachineState.RUNNING
+        self._backward = steps < 0
         self._reads_left = self.backtrack_reads if steps < 0 else self.run_reads
 
     def laser_latch(self, v):
@@ -136,7 +141,10 @@ class FakeCNC:
             self._reads_left -= 1
             if self._reads_left <= 0:
                 self._state = MachineState.IDLE
-                self.processed = self.total
+                # A backward run ends where it was asked to stop; only a
+                # forward one can have played the program out.
+                if not self._backward:
+                    self.processed = self.total
         return self._state
 
     @property
@@ -151,6 +159,28 @@ class FakeCNC:
         y = AxisPosition(self.xy_steps[1], self.xy_steps[1] / 53.333, 0.0)
         z = AxisPosition(0, 0.0, 0.0)
         return Position(x, y, z, PulsPosition(self.total, self.processed))
+
+
+class FakeFeeder:
+    """Feeder stand-in. ``written`` stands still until a test says the feed
+    is moving, which is the whole difference between a wedged feeder and a
+    working one."""
+
+    def __init__(self, written=0, finished=False, moving=False):
+        self._written = written
+        self.moving = moving
+        self.finished = finished
+        self.error = None
+        self.stopped = False
+
+    @property
+    def written(self):
+        if self.moving:
+            self._written += 1
+        return self._written
+
+    def stop(self, timeout=5.0):
+        self.stopped = True
 
 
 class FakeSwitches:
@@ -433,6 +463,7 @@ class RunLoopTests(unittest.TestCase):
         class DeadFeeder:
             error = OSError(5, 'I/O error')
             finished = False
+            written = 0
 
             def stop(self, timeout=5.0):
                 pass
@@ -694,3 +725,97 @@ class ReturnHomeTests(unittest.TestCase):
         self.assertNotIn(('run', 1), CNC.writes)
         self.assertEqual(self.parks, [])
         self.assertEqual(job_events(), [])
+
+
+class FeedWatchdogTests(unittest.TestCase):
+    """A live feed that wedges must not be left to play the ring dry: the
+    job is stopped and retraced while there is still history to retrace
+    over, and picked back up if the feed catches up."""
+
+    def setUp(self):
+        CNC.__init__()
+        SW.__init__()
+        COOL.__init__()
+        del EVENTS[:]
+        del LEDS.button_colors[:]
+        self.m = make_machine()
+        SW.handler = self.m._switch_event
+        self._stall, self._recover = machine_mod.FEED_STALL_S, machine_mod.FEED_RECOVER_S
+        machine_mod.FEED_STALL_S = 0.2
+
+    def tearDown(self):
+        machine_mod.FEED_STALL_S = self._stall
+        machine_mod.FEED_RECOVER_S = self._recover
+        self.m._feeder = None
+
+    def test_stalled_feed_holds_the_job_and_resumes_when_it_moves(self):
+        machine_mod.FEED_RECOVER_S = 5.0
+        feeder = FakeFeeder(written=1000)
+        self.m._feeder = feeder
+        SW._later(0.6, lambda: setattr(feeder, 'moving', True))
+        SW._later(1.2, lambda: setattr(CNC, '_reads_left', 1))
+
+        aborted = self.m._run_loop(pausable=True)
+
+        self.assertFalse(aborted)
+        self.assertFalse(self.m._running_action_cancelled)
+        w = CNC.writes
+        self.assertIn(('stop', 1), w)               # stopped before the ring ran dry
+        self.assertIn(('resume', -2000), w)         # retraced like a pause
+        self.assertIn(('resume', 1950), w)          # and led back on over cut ground
+        self.assertEqual(job_events(), ['print:paused', 'print:resumed'])
+
+    def test_feed_that_never_moves_cancels_the_job(self):
+        machine_mod.FEED_RECOVER_S = 0.5
+        self.m._feeder = FakeFeeder(written=1000)
+
+        aborted = self.m._run_loop(pausable=True)
+
+        self.assertTrue(aborted)
+        self.assertTrue(self.m._running_action_cancelled)
+        self.assertIn(('stop', 1), CNC.writes)
+        # Held, then given up on: the job never claims to have finished.
+        self.assertEqual(job_events(), ['print:paused'])
+
+    def test_a_full_ring_is_not_a_stalled_feed(self):
+        # The feeder has written nothing for the whole run because there is
+        # no room to write into. That is a healthy feed with a full window,
+        # and stopping the job for it would be the watchdog inventing a
+        # fault.
+        CNC.free = 0
+        CNC.run_reads = 12                          # the program ends on its own
+        self.m._feeder = FakeFeeder(written=1000)
+
+        aborted = self.m._run_loop(pausable=True)
+
+        self.assertFalse(aborted)
+        self.assertNotIn(('stop', 1), CNC.writes)
+        self.assertEqual(job_events(), [])
+
+    def test_a_job_that_fits_the_ring_is_never_watched(self):
+        # Nothing left to feed: end-of-data is the end of the job.
+        CNC.run_reads = 12
+        self.m._feeder = FakeFeeder(written=1000, finished=True)
+
+        aborted = self.m._run_loop(pausable=True)
+
+        self.assertFalse(aborted)
+        self.assertNotIn(('stop', 1), CNC.writes)
+
+    def test_a_press_while_held_for_the_feed_is_not_lost(self):
+        # Pausing a job that is already stopped is not a thing the machine
+        # can do, so the press waits for the resume and pauses then.
+        machine_mod.FEED_RECOVER_S = 5.0
+        feeder = FakeFeeder(written=1000)
+        self.m._feeder = feeder
+        SW.press(delay=0.6)                         # while the job is held
+        SW._later(0.9, lambda: setattr(feeder, 'moving', True))
+        SW.press(delay=1.8)                         # resume from that pause
+        SW._later(2.4, lambda: setattr(CNC, '_reads_left', 1))
+
+        aborted = self.m._run_loop(pausable=True)
+
+        self.assertFalse(aborted)
+        self.assertEqual(job_events(),
+                         ['print:paused', 'print:resumed',    # the watchdog's hold
+                          'print:paused', 'print:resumed'])   # the operator's press

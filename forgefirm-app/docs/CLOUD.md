@@ -220,6 +220,21 @@ the storage backend reject it). Without `endpoint`, the legacy
     resume lead covers its re-arm); lid, interlock or a service cancel while
     paused cancel the job from where it stands. Motions and hunts do not pause.
     Both tick counts are `forgefirm.conf` keys.
+  - **a live feed that wedges holds the job the same way.** A feeder with room
+    in the ring in front of it and no progress behind it is not feeding, and
+    left alone it ends one way: the ring plays out what it holds, tens of
+    minutes at the print tick, and then goes dry, which is an underrun, a
+    position no longer trusted and a job that cannot be picked back up. Thirty
+    seconds of that is enough to stop the machine cleanly and retrace, which
+    is done while there is still history to retrace over. If the feed moves
+    again within a minute the job resumes over ground it already cut, seam
+    hidden, `print:paused` and `print:resumed` reporting it exactly as the
+    button pause does; if it does not, the job is cancelled rather than left
+    stopped in the material. A feed that stalls repeatedly (three holds) is
+    cancelled rather than cut in pieces, and a full ring is never mistaken for
+    a stall. A press during a hold is not lost: pausing a stopped job is not a
+    thing the machine can do, so the press is read once the job is moving
+    again.
 - Post-action cleanup always locks the laser latch and drops the pulse-device
   registration — including when an action crashes.
 - A job larger than the ring runs anyway: the client holds the compressed body
@@ -227,6 +242,15 @@ the storage backend reject it). Without `endpoint`, the legacy
   it drains, so the ring is a window onto the job rather than the place the job
   lives. The ring size caps how much of a job is buffered at once (~56 min at
   the print tick), not how long a job may be.
+- What does have a ceiling is the memory that body sits in. The client refuses
+  a job whose declared length is past `pulse_reject_threshold_bytes`, before it
+  takes a byte, and abandons a download that runs past it whatever was
+  declared, because a service that declares nothing (or declares wrongly) must
+  not be handed all the memory there is. A refusal is logged as `refusing the
+  job:` with the size and the limit, so it reads differently from a transport
+  failure, and the print is reported `:cancelled` like any job that never
+  moved. `pulse_warn_threshold_bytes` only logs. Both are memory guards and
+  neither is a ring guard: they say nothing about how long a job may be.
 
 ### The pulse header
 
@@ -290,7 +314,7 @@ ForgeFIRM **never downloads or installs factory firmware.**
 | Where | Keys |
 |---|---|
 | `/data/etc/gfhome.conf` (seeded from `/etc/gfhome.conf.sample`) | `SERVICE.*` (server/status URLs), `FACTORY_FIRMWARE.CHECK` / `STATUS_FILE`, `FORGECTRL.URL`, `LOGGING.SAVE_PULS` / `SAVE_SENT_IMAGES` (both default off) and `LOGGING.CAPTURE_DIR` (default `/data/forgefirm/captures/<app>`), `MOTION.*`, `THERMAL.*`. |
-| `/data/forgefirm.conf` (managed from the forgectrl UI) | `controller_mode` (`grbl` / `cloud` — read by the forgectrl supervisor, which spawns exactly one controller at boot and on every mode switch; the init scripts defer to it), `homing_mode`, identity overrides `gf_serial` / `gf_password` (a serial override re-derives the hostname), and the log levels `log_gfcloud_disk` / `log_gfcloud_remote` and `log_gfhome_*` (each `off`..`debug`; read at process start, so applied at reboot). |
+| `/data/forgefirm.conf` (managed from the forgectrl UI) | `controller_mode` (`grbl` / `cloud`, read by the forgectrl supervisor, which spawns exactly one controller at boot and on every mode switch; the init scripts defer to it), `homing_mode`, identity overrides `gf_serial` / `gf_password` (a serial override re-derives the hostname), the pause pair `cloud_pause_backtrack_ticks` / `cloud_resume_lead_ticks`, the download guards `pulse_warn_threshold_bytes` / `pulse_reject_threshold_bytes` (bytes of compressed body held in memory, unset = 32 MiB warn and 128 MiB refuse, 0 lifts either), and the log levels `log_gfcloud_disk` / `log_gfcloud_remote` and `log_gfhome_*` (each `off`..`debug`; read at process start, so applied at reboot). |
 
 ## Outstanding items
 
@@ -298,13 +322,17 @@ ForgeFIRM **never downloads or installs factory firmware.**
   `update_check`, `user_image`, or `factory_reset`; their exact expected
   payloads/acks are unconfirmed (current handlers are deliberate defaults —
   capture and adjust when first observed).
-- **Oversize-job rejection:** not yet exercised against a live job larger than
-  the kernel ring.
+- **A live job longer than the ring:** the feed is built and covered by host
+  tests, and `cloud.oversize-stream` is written for it, but no job the ring
+  cannot hold has yet been run from the live service.
+- **The memory guards against a real ceiling:** `pulse_reject_threshold_bytes`
+  defaults to 128 MiB of compressed body, which at the compression the service
+  actually uses is days of cutting. Nothing has come close, so the number is
+  reasoned rather than measured. Every job logs the body it arrived as and the
+  program it played, so the ratio the guards are sized against accumulates in
+  the log.
 - **Packaged-path boot:** validate `gfcloud.init` autostart on a flashed image
   with `controller_mode = cloud`.
-- **Streaming-during-run:** the kernel ring supports live append while running;
-  interleaving download → ring-write → run (with backpressure) would lift the
-  ring-size cap on job length.
 - **Lid-flash hardware application:** drive the lid flash LED from `LCfl` (and
   any future exposure mapping) in gfhardware.
 - **8 MP ("HD") machines:** an OV8856 machine captures 3264x2448, not the
