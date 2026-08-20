@@ -47,12 +47,19 @@ Excluded channels:
 
 - `POST /api/sensor` — the binary sensor firehose.
 - WSS `type:"log"` messages — in-band advisory logs.
-- WSS `type:"progress"` messages — progress-bar feed.
 - The `fault:*` / `estop:*` / `interlock:*` **cloud reporting** namespace.
   (Local fault-to-safe handling is independent of reporting and fully active.)
 
 On-demand requests are still answered: the `settings` report, image captures,
 and the functional action handshake.
+
+**One exception, deliberately kept: the progress frame.** A capture of the
+factory's own cloud session showed that the app's progress bar rides a WSS
+`type:"progress"` frame the machine sends every 30 s during a job (below,
+"Progress reporting"). That is a UI status update, not the sensor telemetry
+this section excludes, so ForgeFIRM carries it. The bar is the operator's only
+sign a multi-hour print is advancing; going dark for hours is not a scope we
+want. Everything else above stays excluded.
 
 ## Connection and authentication
 
@@ -176,6 +183,47 @@ Service behavior worth knowing:
 - Server-side session state can be sticky: after abnormal session deaths the
   service may stall silently mid-sequence in the next session. A fresh WS
   session recovers it.
+
+### Progress reporting
+
+The app's progress bar rides one carrier, and it is neither of the two the
+strings suggested. Settled by a capture of the factory's own session:
+
+- **The carrier is an outbound WSS `type:"progress"` frame**, machine to
+  service, and nothing else. No `<action>:progress` event, and no
+  `progress_bytes` query on the action endpoint, appeared in a full session.
+- **The progress frame is the periodic settings report.** Its `settings.values`
+  block is exactly `periodic_settings_tags` (`BTvl CAid CCbp CCst CCxp CCyp
+  CMet FTvl HTvl IRva IRvb IRvc IRvd ITvl LTvl`): board / fused / head /
+  interconnect / lid temperatures, four IR values, a camera id, a coolant
+  value, the byte position `CCbp`, the state `CCst`, and X/Y position
+  `CCxp`/`CCyp`. Progress and the periodic telemetry are one message, which is
+  why carrying it is cheap: the client already builds the ~600-key settings
+  report on demand.
+
+  ```json
+  {"id":359,"type":"progress","version":1,"action_id":1577564802,
+   "progress":"print:progress","current":994,"units":"steps","total":33291208,
+   "settings":{"values":{"CCbp":1009,"CCst":1,"CCxp":0,"CCyp":0, ...}}}
+  ```
+
+- **Cadence is 30 s** (`progress_update_interval_ms` = 30000), plus a burst at
+  every phase transition. During a cut `current` advances at the step
+  frequency; at the phase boundaries the frame is `<action>:download`,
+  `<action>:upload`, etc., with `current` in bytes.
+- **`total` is bytes enqueued, not the job.** In the captured print it grew
+  33,291,208 → 33,553,352 → 33,815,496 in steps of 262,144 (256 KiB per
+  interval): the factory live-appending to its ring, on the wire. A progress
+  report of `current/total` therefore divides by a denominator that is itself
+  growing. Under ForgeFIRM's streaming feed the report must divide by the
+  feeder's own job total, never the kernel's byte counter (see
+  `CLOUD_BIG_LOAD.md` Part F).
+- `CCbp` reads the byte position (1009 against `current` 994 in the frame
+  above), independently re-confirming it as telemetry rather than the pause
+  constant an earlier reading guessed.
+
+ForgeFIRM does not send this frame yet; doing so is the F2 work, and the shape
+above is what it emits.
 
 ## Image upload
 
@@ -343,6 +391,14 @@ ForgeFIRM **never downloads or installs factory firmware.**
 
 ## Outstanding items
 
+- **Progress reporting (F2):** the carrier, the frame and the cadence are now
+  known (above, "Progress reporting"); what remains is to send it, computed
+  against the feeder's job total rather than the kernel byte counter. The
+  factory also reports a pause as a phase machine of ten events
+  (`print:pausing_decel`, `print:pausing_backtrack`, `print:paused`,
+  `print:resuming`, each with `:starting`/`:succeeded`) against the two
+  ForgeFIRM sends; matching that granularity is optional polish on the same
+  work.
 - **Unobserved actions:** the live service has not been seen issuing
   `update_check`, `user_image`, or `factory_reset`; their exact expected
   payloads/acks are unconfirmed (current handlers are deliberate defaults —
