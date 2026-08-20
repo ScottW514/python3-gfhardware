@@ -556,16 +556,22 @@ ForgeFIRM **never downloads or installs factory firmware.**
   `CCbp` sits in the periodic-settings set beside the state and X/Y position
   tags. They are reported progress, not job parameters. The `forgefirm.conf`
   values stand.
-- **The job's own lifecycle periods:** `CCwp` and `CCrp` carry 5000 and 10000
-  in every captured print header and nothing at all in a motion or a hunt,
-  which reads as the warm-up and rest periods in milliseconds, alongside
-  `CFrh` for the park and `CCup`, whose meaning is unknown. That is
-  correlation and naming rather than a decode, so nothing is driven off them
-  yet: the periods come from the config, defaulted to what the factory was
-  measured doing, and all four keys are named in the log of every job so a
-  capture that breaks the correlation is recognizable when it turns up. What
-  would settle it: a print with `CFrh = 0`, a motion with `CFrh = 1`, or the
-  consumer located in the factory binary.
+- ~~**The job's own lifecycle periods:**~~ **settled, and the answer is that
+  there is nothing to drive.** `CCwp` and `CCrp` carry 5000 and 10000 in every
+  captured print header and nothing in a motion or a hunt, which read as the
+  warm-up and rest periods in milliseconds, with `CFrh` for the park. The
+  correlation is real and the causation is not: in the 2.6.0 application all
+  four of `CCrp`, `CCup`, `CCwp` and `CFrh` are parsed, stored, copied into
+  the settings batch and then acted on by nothing. A tag reaches behavior
+  either through a peripheral that registers it against a source or through
+  an inlined lookup by index, and these four have neither. The coolant flow
+  controller registers seventeen of the eighteen `CF` tags in one array and
+  the one it omits is `CFrh`; the only inlined per-tag lookup in the whole
+  image is the `MCsn` serial check. The factory's warm-up and rest come from
+  somewhere other than the job, so ForgeFIRM's configured periods, defaulted
+  to what the factory was measured doing, are the right model rather than a
+  placeholder. The keys stay in the per-job log line as a record of what the
+  service sends.
 - **Coolant control per job:** the forgectrl cooling engine holds the pump
   on as part of its idle posture; the `WPon` pulse-header key has no
   applier — if per-job pump control is ever wanted, it belongs in the

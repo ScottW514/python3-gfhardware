@@ -92,17 +92,18 @@ FEED_MAX_HOLDS = 3         # a feed that keeps stalling is sawing the material
 # not ceremony - the warm-up is what gets air and coolant moving before the
 # first fire, and the rest is what purges the enclosure and the tube after
 # the last one - and the service assumes both have happened. The pulse header
-# carries candidates for the two periods (CCwp, CCrp), but their meaning is
-# correlation and naming rather than a decode, so the numbers come from the
-# config with the factory's measurements as the default.
+# carries two keys that correlate with the periods (CCwp, CCrp), and the
+# factory does nothing with them, so the numbers come from the config with the
+# factory's measured behavior as the default.
 WARM_UP_DEFAULT_S = 3.0
 COOL_DOWN_DEFAULT_S = 10.0
 
-# Header keys that speak to a job's lifecycle rather than to its motion:
-# a park flag and the two periods above, plus one print-only flag whose
-# meaning is unknown. Nothing drives behavior off them yet; they are named
-# in the log of every job so a capture that breaks the correlation can be
-# recognized when it turns up.
+# Header keys that speak to a job's lifecycle rather than to its motion: a
+# park flag and the two periods above, plus one print-only flag whose meaning
+# is unknown. Nothing drives behavior off them, and nothing should: the
+# factory acts on none of the four either, and its own warm-up and rest come
+# from somewhere other than the job. They are named in the log of every job as
+# a record of what the service sends.
 LIFECYCLE_KEYS = ('CFrh', 'CCwp', 'CCrp', 'CCup')
 
 # Header keys this client acts on outside the settings table: the serial the
