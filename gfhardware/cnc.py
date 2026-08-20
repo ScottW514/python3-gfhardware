@@ -256,8 +256,40 @@ class _CNC(object):
             return MachineState.FAULT
 
     @property
+    def free(self) -> int:
+        """Bytes the pulse ring will accept right now, less its backtrack gap.
+
+        Reading it costs two SDMA transactions, so it is for reporting and
+        pre-flight, never for pacing: a feeder paces on -ENOMEM from the
+        write instead.
+        """
+        return int(read_file(SYSFS_GF_BASE + 'cnc/free'))
+
+    @property
     def step_freq(self) -> int:
         return int(read_file(SYSFS_GF_BASE + 'cnc/step_freq'))
+
+    @property
+    def streaming(self) -> bool:
+        """Whether end-of-data mid-run counts as an underrun."""
+        return read_file(SYSFS_GF_BASE + 'cnc/streaming').strip() == '1'
+
+    @staticmethod
+    def set_streaming(val: Union[bool, int, str]):
+        """Declare a live feed (1) or a fully-enqueued program (0).
+
+        A live-fed run sets this before ``run`` so a ring that goes dry lands
+        in ``underrun`` instead of looking like a clean finish, and clears it
+        after the job's last bytes are enqueued so the real end-of-data counts
+        as completion.
+        """
+        logger.info(val)
+        write_attr(SYSFS_GF_BASE + 'cnc/streaming', int(val))
+
+    @property
+    def underruns(self) -> int:
+        """Streaming underruns since the module was loaded."""
+        return int(read_file(SYSFS_GF_BASE + 'cnc/underruns'))
 
     @staticmethod
     def stop():

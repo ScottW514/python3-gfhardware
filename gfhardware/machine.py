@@ -14,13 +14,15 @@ from typing import Union
 from gfutilities import BaseMachine
 from gfutilities.configuration import get_cfg, set_cfg
 from gfutilities.puls import generate_linear_puls
-from gfutilities.service.websocket import load_motion, img_upload, send_wss_event
+from gfutilities.service.websocket import (fetch_motion, load_motion, img_upload,
+                                           motion_run_time, send_wss_event)
 from gfutilities.device.settings import MACHINE_SETTINGS, update_settings
 
 from gfhardware import id
 from gfhardware._common import *
 from gfhardware.cnc import *
 from gfhardware.cooling import *
+from gfhardware.feeder import PulseFeeder
 from gfhardware.coolsvc import cooling_svc
 from gfhardware.leds import *
 from gfhardware.switches import *
@@ -103,6 +105,7 @@ class Machine(BaseMachine):
 
         self._button_pressed: bool = False
         self._motion_stats: dict = {}
+        self._feeder = None
         self._sw_thread: SwitchMonitor = SwitchMonitor(SWITCH_DEVICE, self._switch_event)
         # Edge-to-run-loop signaling. The switch thread flags edges and
         # wakes the run loop; the run loop (the one owner of every cnc
@@ -264,6 +267,10 @@ class Machine(BaseMachine):
         cnc.stop()
         cnc.laser_latch(1)
         head_all_led_off()
+        if self._feeder is not None:
+            self._feeder.stop()
+            self._feeder = None
+        cnc.set_streaming(False)
         cnc.set_pulse_dev(None)
         cooling_svc.set_armed(False)
         cooling_svc.set_mode('idle')
@@ -330,9 +337,16 @@ class Machine(BaseMachine):
     def _motion_locked(self, msg: dict, pulse_dev, lid_gated: bool = True) -> None:
         """Body of a motion/print job; runs with the deadman fd held."""
         cnc.clear_all()
-        # Download puls file from service
+        # A job abandoned mid-feed could have left the device in live-feed
+        # mode, where this job's ordinary end-of-data would read as a starved
+        # ring. Start every job from the plain meaning.
+        cnc.set_streaming(False)
+        # Download puls file from service. It stays in memory: the service
+        # compresses the stream tens to one, so even a job hours long is a
+        # few MB held, nothing written to the eMMC, and the ring is fed from
+        # it as it drains.
         logger.info('loading motion file from %s' % msg['motion_url'])
-        stats = load_motion(self._session, msg['motion_url'], pulse_dev)
+        stats, source = fetch_motion(self._session, msg['motion_url'])
         if not stats:
             # Rejected before anything reached the ring (bad magic, short
             # or unusable header): cancel cleanly instead of subscripting
@@ -341,7 +355,24 @@ class Machine(BaseMachine):
             self._running_action_cancelled = True
             return
         self._motion_stats = stats
-        logger.info('motion stats: %s' % self._motion_stats)
+        logger.info('motion header: %s' % self._motion_stats['header_data'])
+        # Fill the ring before the operator is asked for the button, so a job
+        # that cannot be loaded fails before the laser is ever armed.
+        self._feeder = PulseFeeder(source, pulse_dev)
+        self._feeder.start()
+        if not self._feeder.wait_primed():
+            logger.error('could not load the job into the ring: %s',
+                         self._feeder.error)
+            self._feeder.stop()
+            self._feeder = None
+            self._running_action_cancelled = True
+            return
+        if self._feeder.finished:
+            logger.info('job fits the ring: %d bytes enqueued',
+                        self._feeder.written)
+        else:
+            logger.info('job is longer than the ring: %d bytes enqueued, '
+                        'feeding the rest as it plays', self._feeder.written)
         if msg['action_type'] == 'print':
             send_wss_event(self._q_msg_tx, msg['id'], 'print:download:completed')
             # The cooling engine's verdict gates the armed window: a
@@ -372,15 +403,32 @@ class Machine(BaseMachine):
             if msg['action_type'] == 'print':
                 logger.info('start temps: %s' % str(temp_sensor.all))
                 send_wss_event(self._q_msg_tx, msg['id'], 'print:running')
+            if not self._feeder.finished:
+                # End-of-data mid-run now means a starved ring, not a
+                # finished job.
+                self._feeder.declare_live_feed()
             self._run_loop(lid_gated=lid_gated,
                            pausable=msg['action_type'] == 'print')
+            if self._feeder.finished:
+                # The step totals are what the end position is checked
+                # against, so let the accounting catch up before reading it.
+                self._feeder.settle()
+            self._feeder.stop()
+            self._motion_stats['size'] = self._feeder.written
+            self._motion_stats['stats'] = self._feeder.stats
+            self._motion_stats['run_time'] = motion_run_time(
+                self._motion_stats, self._feeder.written)
+            # The job's feed is over. The park that may follow writes its own
+            # small program and must not inherit this one's state.
+            self._feeder = None
             cnc.laser_latch(1)
             cooling_svc.set_armed(False)
             pos = cnc.position
+            expected = self._motion_stats['stats'] or {}
             logger.info('end positions (actual/expected): X (%s/%s), Y (%s/%s), Z (%s/%s)' % (
-                pos.x.steps, self._motion_stats['stats']['XEND'],
-                pos.y.steps, self._motion_stats['stats']['YEND'],
-                pos.z.steps, self._motion_stats['stats']['ZEND'],
+                pos.x.steps, expected.get('XEND'),
+                pos.y.steps, expected.get('YEND'),
+                pos.z.steps, expected.get('ZEND'),
             ))
             logger.info('motion bytes actual:%s, expected: %s' %
                         (pos.bytes.processed, self._motion_stats['size']))
@@ -490,6 +538,18 @@ class Machine(BaseMachine):
         paused = False
         while True:
             state = cnc.state
+            if state is MachineState.UNDERRUN:
+                # A live-fed ring went dry mid-run. The stop was instant, so
+                # steps were skipped at speed: the position is not to be
+                # trusted, and the job did not finish. Acknowledge it (which
+                # returns the device to idle) and report the job cancelled.
+                logger.error('pulse buffer ran dry mid-run after %s bytes; '
+                             'position is no longer trusted',
+                             cnc.position.bytes.processed)
+                cnc.stop()
+                self._running_action_cancelled = True
+                aborted = True
+                break
             if state is not MachineState.RUNNING and not paused:
                 break                       # program ended, or the kernel faulted
             switches = self._sw_thread.all_switches()
@@ -500,7 +560,13 @@ class Machine(BaseMachine):
             # A locally-aborted run must not report ':completed' to the
             # service: marking the action cancelled routes the finish
             # through the ':cancelled' event.
-            if self._running_action_cancelled and not park:
+            if (not park and self._feeder is not None
+                    and self._feeder.error is not None):
+                logger.error('pulse feed failed mid-run (%s); stopping motion',
+                             self._feeder.error)
+                self._running_action_cancelled = True
+                aborted = True
+            elif self._running_action_cancelled and not park:
                 logger.warning('action cancelled mid-run; stopping motion')
                 aborted = True
             elif enclosure is not None and lid_gated and not park:

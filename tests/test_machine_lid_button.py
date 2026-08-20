@@ -36,6 +36,17 @@ _pkg = types.ModuleType('gfhardware')
 _pkg.__path__ = [os.path.join(ROOT, 'gfhardware')]
 sys.modules['gfhardware'] = _pkg
 
+try:
+    import fcntl                                                   # noqa: F401
+except ImportError:
+    # The job holds the pulse device flock'd for the kernel dead man's
+    # switch. The lock is not what these tests exercise, so a stub keeps
+    # them runnable on a host without it.
+    _fcntl = types.ModuleType('fcntl')
+    _fcntl.LOCK_EX = 2
+    _fcntl.flock = lambda *a, **k: None
+    sys.modules['fcntl'] = _fcntl
+
 from gfhardware._common import (InputSwitch, MachineState, ButtonColor,   # noqa: E402
                                 SwitchEvent, Position, AxisPosition, PulsPosition,
                                 HeadInfo)
@@ -61,6 +72,9 @@ class FakeCNC:
         self.resume_error = None
         self.clear_error = None
         self.xy_steps = (10, 10)
+        self.streaming_writes = []
+        # After this many state reads a live-fed run reports a dry ring.
+        self.underrun_after = None
 
     # -- attributes the Machine constructor maps pulse-header keys onto
     def set_step_freq(self, v): self.writes.append(('step_freq', v))
@@ -99,6 +113,9 @@ class FakeCNC:
             raise self.clear_error
         self.writes.append(('clear_pulse', 1))
 
+    def set_streaming(self, val):
+        self.streaming_writes.append(int(val))
+
     def set_pulse_dev(self, dev): pass
     def enable(self): pass
     def disable(self): pass
@@ -107,6 +124,11 @@ class FakeCNC:
     @property
     def state(self):
         if self._state is MachineState.RUNNING:
+            if self.underrun_after is not None:
+                self.underrun_after -= 1
+                if self.underrun_after <= 0:
+                    self._state = MachineState.UNDERRUN
+                    return self._state
             self._reads_left -= 1
             if self._reads_left <= 0:
                 self._state = MachineState.IDLE
@@ -372,6 +394,46 @@ class RunLoopTests(unittest.TestCase):
         threading.Timer(0.05, lambda: setattr(self.m, '_running_action_cancelled', True)).start()
         aborted = self.m._run_loop()
         self.assertTrue(aborted)
+        self.assertIn(('stop', 1), CNC.writes)
+
+    # -- a live feed that falls behind ---------------------------------
+
+    def test_underrun_mid_run_stops_and_cancels(self):
+        # A job longer than the ring is fed while it plays. If the ring ever
+        # goes dry the kernel stops dead, so the job did not finish and the
+        # position is not to be trusted: it has to end ':cancelled', never
+        # ':completed'.
+        CNC.underrun_after = 3
+        aborted = self.m._run_loop()
+        self.assertTrue(aborted)
+        self.assertTrue(self.m._running_action_cancelled)
+        # The stop is also the acknowledgement the kernel requires before it
+        # will accept another run.
+        self.assertIn(('stop', 1), CNC.writes)
+
+    def test_underrun_while_paused_is_not_missed(self):
+        CNC.underrun_after = 3
+        aborted = self.m._run_loop(pausable=True)
+        self.assertTrue(aborted)
+        self.assertTrue(self.m._running_action_cancelled)
+
+    def test_feed_failure_mid_run_stops_the_job(self):
+        # The feeder cannot get the rest of the job into the ring: what is
+        # already in there would keep playing, so the run has to be stopped.
+        class DeadFeeder:
+            error = OSError(5, 'I/O error')
+            finished = False
+
+            def stop(self, timeout=5.0):
+                pass
+
+        self.m._feeder = DeadFeeder()
+        try:
+            aborted = self.m._run_loop()
+        finally:
+            self.m._feeder = None
+        self.assertTrue(aborted)
+        self.assertTrue(self.m._running_action_cancelled)
         self.assertIn(('stop', 1), CNC.writes)
 
     def test_cooling_verdict_pulled_relocks_and_stops(self):
