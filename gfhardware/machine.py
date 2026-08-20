@@ -16,7 +16,8 @@ from gfutilities.configuration import get_cfg, set_cfg
 from gfutilities.puls import generate_linear_puls
 from gfutilities.service.websocket import (PULSE_REJECT_BYTES, PULSE_WARN_BYTES,
                                            fetch_motion, img_upload,
-                                           motion_run_time, send_wss_event)
+                                           motion_run_time, send_wss_event,
+                                           send_wss_progress)
 from gfutilities.device.settings import MACHINE_SETTINGS, update_settings
 
 from gfhardware import id
@@ -109,6 +110,23 @@ LIFECYCLE_KEYS = ('CFrh', 'CCwp', 'CCrp', 'CCup')
 # reaches the ring.
 HEADER_CHECKED_KEYS = ('MCsn', 'PDfm')
 
+# How often a running print tells the service where it has gotten to. The
+# factory's progress_update_interval_ms is 30 s and the app is built around
+# that pace, so this is protocol parity rather than a preference and lives
+# here rather than in the machine config. Phase changes report at once,
+# whatever it says.
+PROGRESS_INTERVAL_S = 30.0
+
+# The driver state as the wire numbers it (CCst), which is the kernel's own
+# order: a running machine reports 1, which is what a factory capture shows.
+CCST_STATE = {
+    MachineState.IDLE: 0,
+    MachineState.RUNNING: 1,
+    MachineState.DISABLED: 2,
+    MachineState.FAULT: 3,
+    MachineState.UNDERRUN: 4,
+}
+
 
 def _conf_float(key: str, default: float) -> float:
     try:
@@ -126,6 +144,85 @@ def _conf_float(key: str, default: float) -> float:
     except OSError:
         pass
     return default
+
+
+class _JobProgress:
+    """The moving bar the app shows while a job runs.
+
+    A print is the one action long enough to need one, and the factory
+    reports exactly that one: a progress frame at every phase change and
+    one every 30 s in between, carrying how far the program has played
+    against how long it is.
+
+    The denominator is the whole point. The kernel's byte total counts what
+    has been *enqueued*, and under a live feed that number climbs all job
+    long, which is why the factory's own bar divides by a moving figure. The
+    job's length is fixed and known before the first byte plays, so it is
+    what this divides by, and the bar means what it says.
+    """
+
+    def __init__(self, q_tx, action_id, label: str, total: Union[int, None],
+                 interval: float = None):
+        self._q_tx = q_tx
+        self._action_id = action_id
+        self._label = label
+        # Frozen for the life of the job: a denominator that moves is the
+        # defect this exists to avoid.
+        self._total = total if total and total > 0 else None
+        self._interval = PROGRESS_INTERVAL_S if interval is None else interval
+        self._last = 0.0
+        self._over = False
+        if self._total is None:
+            logger.info('%s: job length unknown; reporting position without '
+                        'a total', label)
+        else:
+            # The denominator, once per job: it is what every frame of this
+            # job divides by, and the one number a bar that misbehaves is
+            # worth checking first.
+            logger.info('%s: reporting against %d bytes every %.0f s',
+                        label, self._total, self._interval)
+
+    def send(self, force: bool = False) -> None:
+        """Report now if a phase changed, or if the interval has come round."""
+        if self._interval <= 0 or self._q_tx is None:
+            return
+        now = monotonic()
+        if not force and now - self._last < self._interval:
+            return
+        self._last = now
+        try:
+            pos = cnc.position
+            state = cnc.state
+        except (OSError, ValueError) as e:
+            # Reporting must never be what ends a job.
+            logger.debug('progress not reported: %s', e)
+            return
+        played = pos.bytes.processed
+        current = played
+        if self._total is not None and current > self._total:
+            # The job outran the length it declared. Report it finished
+            # rather than past its own end, and say so once: a bar that
+            # overshoots means the declared length was wrong.
+            if not self._over:
+                logger.warning('%s: played %d bytes against a declared %d; '
+                               'reporting the job complete',
+                               self._label, current, self._total)
+                self._over = True
+            current = self._total
+        # The frame doubles as the periodic settings report. Of the fifteen
+        # tags the factory carries there, these are the four that describe
+        # the job rather than the machine's sensors, plus the action they
+        # belong to; the sensor readings stay excluded (CLOUD.md, "Scope").
+        # CCbp is the raw byte position, which is why it can sit past the
+        # clamped bar rather than with it.
+        send_wss_progress(self._q_tx, self._action_id, self._label, current,
+                          units='steps', total=self._total,
+                          values={'CAid': self._action_id or 0,
+                                  'CCbp': played,
+                                  'CCst': CCST_STATE.get(state, 0),
+                                  'CCxp': pos.x.steps,
+                                  'CCyp': pos.y.steps})
+        logger.debug('%s: %d/%s', self._label, current, self._total)
 
 
 class Machine(BaseMachine):
@@ -468,8 +565,17 @@ class Machine(BaseMachine):
                 # End-of-data mid-run now means a starved ring, not a
                 # finished job.
                 self._feeder.declare_live_feed()
+            progress = None
+            if msg['action_type'] == 'print':
+                # Only a print is long enough to need a bar, and only a
+                # print is what the factory reports; a motion or a hunt is
+                # over before a first frame would land.
+                progress = _JobProgress(self._q_msg_tx, msg['id'],
+                                        'print:progress',
+                                        self._feeder.job_total)
             self._run_loop(lid_gated=lid_gated,
-                           pausable=msg['action_type'] == 'print')
+                           pausable=msg['action_type'] == 'print',
+                           progress=progress)
             if self._feeder.finished:
                 # The step totals are what the end position is checked
                 # against, so let the accounting catch up before reading it.
@@ -548,7 +654,18 @@ class Machine(BaseMachine):
             send_wss_event(self._q_msg_tx, self.running_action_id, 'print:return_to_home:succeeded')
             return
         generate_linear_puls(pos.x.steps * -1, pos.y.steps * -1, pulse_dev)
-        if self._run_loop(park=True):
+        # The park is the print's last leg and reports under the print, as
+        # the factory reports it. Its whole program is in the ring before it
+        # runs, so what the kernel counts as enqueued is the program itself
+        # and is a denominator that stands still.
+        try:
+            park_total = cnc.position.bytes.total
+        except (OSError, ValueError):
+            park_total = None
+        if self._run_loop(park=True,
+                          progress=_JobProgress(self._q_msg_tx,
+                                                self.running_action_id,
+                                                'print:progress', park_total)):
             logger.warning('return home interrupted; not reporting success')
             return
         logger.info('return home complete')
@@ -674,7 +791,7 @@ class Machine(BaseMachine):
         return False
 
     def _run_loop(self, park: bool = False, lid_gated: bool = True,
-                  pausable: bool = False) -> bool:
+                  pausable: bool = False, progress: '_JobProgress' = None) -> bool:
         """Play the loaded program. Returns True if the run was aborted
         (stopped before the program's end), False if it ran to completion.
 
@@ -700,6 +817,10 @@ class Machine(BaseMachine):
         The switch thread wakes this loop on every edge, so a reaction
         lands within milliseconds; the level read each pass is the
         backstop for an edge the thread missed.
+
+        ``progress``, when a caller supplies one, reports the run to the
+        service: once as it starts, at every pause, resume and hold, once
+        more when it ends, and on its own interval in between.
         """
         logger.info('starting run')
         logger.info('current state: %s' % cnc.state)
@@ -733,8 +854,12 @@ class Machine(BaseMachine):
         feed_held = False
         feed_deadline = 0.0
         feed_holds = 0
+        if progress is not None:
+            progress.send(force=True)
         while True:
             state = cnc.state
+            if progress is not None:
+                progress.send()
             if state is MachineState.UNDERRUN:
                 # A live-fed ring went dry mid-run. The stop was instant, so
                 # steps were skipped at speed: the position is not to be
@@ -810,6 +935,8 @@ class Machine(BaseMachine):
                         if pausable:
                             send_wss_event(self._q_msg_tx, self.running_action_id,
                                            'print:resumed')
+                        if progress is not None:
+                            progress.send(force=True)
                         # Give the kernel a moment to leave idle before the
                         # next pass reads the state.
                         sleep(.05)
@@ -848,6 +975,8 @@ class Machine(BaseMachine):
                     if pausable:
                         send_wss_event(self._q_msg_tx, self.running_action_id,
                                        'print:paused')
+                    if progress is not None:
+                        progress.send(force=True)
                     logger.info('held at %s, waiting for the feed', cnc.position)
                     continue
 
@@ -865,6 +994,8 @@ class Machine(BaseMachine):
                     paused = False
                     send_wss_event(self._q_msg_tx, self.running_action_id,
                                    'print:resumed')
+                    if progress is not None:
+                        progress.send(force=True)
                     # Give the kernel a moment to leave idle before the
                     # next pass reads the state.
                     sleep(.05)
@@ -882,6 +1013,8 @@ class Machine(BaseMachine):
                 paused = True
                 send_wss_event(self._q_msg_tx, self.running_action_id,
                                'print:paused')
+                if progress is not None:
+                    progress.send(force=True)
                 logger.info('paused at %s', cnc.position)
                 continue
             if (paused or feed_held) and state not in (MachineState.IDLE,
@@ -891,6 +1024,10 @@ class Machine(BaseMachine):
             self._run_wake.clear()
         logger.info('current state: %s' % cnc.state)
         set_button_color(ButtonColor.OFF)
+        if progress is not None:
+            # Where the job actually ended, whether that is the end of the
+            # program or wherever it was stopped.
+            progress.send(force=True)
         logger.info('finished run')
         return aborted
 

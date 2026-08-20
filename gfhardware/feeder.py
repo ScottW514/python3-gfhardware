@@ -95,6 +95,20 @@ class PulseFeeder:
         """True once every byte of the job has been enqueued."""
         return self._done.is_set()
 
+    @property
+    def job_total(self) -> int:
+        """How long the whole job is, for anything that reports progress.
+
+        Once the feed is done, what went in is the authority. Before that it
+        is what the job declared itself to be, which is known before the
+        first byte plays and does not move while it does. None when the job
+        will not say, and a caller reports position without a total rather
+        than dividing by a guess.
+        """
+        if self._done.is_set():
+            return self._written
+        return getattr(self._source, 'program_size', None)
+
     # -- lifecycle -------------------------------------------------------
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name='pulse-feeder',
@@ -219,6 +233,13 @@ class PulseFeeder:
                 # the job, not a starved ring.
                 self._set_streaming(False)
             logger.info('feeder finished: %d bytes enqueued', self._written)
+            declared = getattr(self._source, 'program_size', None)
+            if declared is not None and declared != self._written:
+                # Progress was reported against the declared length all job
+                # long, so a job that does not end where it said it would is
+                # worth a line: it is the one thing that can put the bar out.
+                logger.warning('job declared %d bytes and delivered %d',
+                               declared, self._written)
             self._done.set()
             self._primed.set()
             # Whatever accounting is left can finish while the machine plays

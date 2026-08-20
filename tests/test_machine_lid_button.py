@@ -7,14 +7,17 @@ SPDX-License-Identifier:    MIT
 
 Host tests for the cloud-mode job supervision in gfhardware.machine: how
 a running or waiting job reacts to the lid, the interlock loop, the
-button, and a service cancel. The real Machine code runs against a fake
-kernel wrapper (records every cnc write, plays a simple state machine)
-and a fake switch monitor (settable switch word, edge delivery on the
-switch thread), with the wire events captured.
+button, and a service cancel, and what it reports about itself while it
+runs. The real Machine code runs against a fake kernel wrapper (records
+every cnc write, plays a simple state machine) and a fake switch monitor
+(settable switch word, edge delivery on the switch thread), with the wire
+events captured.
 
 Run:  PYTHONPATH=.:../Glowforge-Utilities python3 -m unittest tests.test_machine_lid_button
 """
+import json
 import os
+import queue
 import sys
 import tempfile
 import threading
@@ -891,3 +894,159 @@ class JobLifecycleTests(unittest.TestCase):
         self.assertEqual(len(line), 1, caught.output)
         for key in machine_mod.LIFECYCLE_KEYS:
             self.assertIn('%s=-' % key, line[0])
+
+
+class ProgressTests(unittest.TestCase):
+    """What the app's progress bar is told while a print runs.
+
+    The frames go into a real queue and come back off it as the wire sees
+    them, so the shape is checked rather than assumed. The one thing that
+    must hold whatever the machine does: the bar divides by the job, and
+    the job's length does not move even when the kernel's byte counter
+    does.
+    """
+
+    def setUp(self):
+        CNC.__init__()
+        SW.__init__()
+        COOL.__init__()
+        del EVENTS[:]
+        del LEDS.button_colors[:]
+        self.m = make_machine()
+        SW.handler = self.m._switch_event
+        self.q = queue.Queue()
+
+    def frames(self):
+        out = []
+        while not self.q.empty():
+            out.append(json.loads(self.q.get_nowait()))
+        return out
+
+    def progress(self, total, interval=0.02, action_id=42):
+        return machine_mod._JobProgress(self.q, action_id, 'print:progress',
+                                        total, interval=interval)
+
+    # -- the frame itself ----------------------------------------------
+
+    def test_the_frame_is_the_one_the_factory_sends(self):
+        CNC.run()                                  # a job under way
+        CNC.processed, CNC.total = 994, 33291208
+        CNC.xy_steps = (7, 9)
+        self.progress(33291208).send(force=True)
+        frame = self.frames()[0]
+        self.assertEqual(frame['type'], 'progress')
+        self.assertEqual(frame['version'], 1)
+        self.assertEqual(frame['action_id'], 42)
+        self.assertEqual(frame['progress'], 'print:progress')
+        self.assertEqual(frame['current'], 994)
+        self.assertEqual(frame['units'], 'steps')
+        self.assertEqual(frame['total'], 33291208)
+        # The progress frame is also the periodic settings report: these
+        # are the job's own values, and the sensor tags stay out of it.
+        self.assertEqual(frame['settings']['values'],
+                         {'CAid': 42, 'CCbp': 994, 'CCst': 1, 'CCxp': 7,
+                          'CCyp': 9})
+
+    def test_a_job_of_unknown_length_reports_position_without_a_total(self):
+        # Better an honest position than a bar divided by a guess.
+        self.progress(None).send(force=True)
+        frame = self.frames()[0]
+        self.assertNotIn('total', frame)
+        self.assertIn('current', frame)
+
+    def test_reporting_can_be_turned_off(self):
+        self.progress(1000, interval=0).send(force=True)
+        self.assertEqual(self.frames(), [])
+
+    # -- what the bar divides by ----------------------------------------
+
+    def test_the_bar_divides_by_the_job_not_the_kernel_counter(self):
+        # A job longer than the ring is fed while it plays, so the kernel's
+        # byte total climbs all job long. Dividing by it would leave the bar
+        # near complete from the first frame to the last, which is the trap
+        # the factory's own progress falls into. The job's length is what
+        # the report divides by, and it does not move.
+        job = 4000
+        CNC.processed, CNC.total = 0, 1000
+        CNC.run_reads = 10 ** 9
+
+        def feed():
+            for _ in range(20):
+                CNC.total += 1000              # the ring is topped up
+                CNC.processed += 200           # and played out
+                time.sleep(0.01)
+            CNC._reads_left = 1                # the program ends
+
+        threading.Timer(0.05, feed).start()
+        self.m._run_loop(pausable=True, progress=self.progress(job))
+
+        frames = self.frames()
+        self.assertGreater(len(frames), 2, 'no progress was reported')
+        self.assertTrue(all(f['total'] == job for f in frames),
+                        [f['total'] for f in frames])
+        currents = [f['current'] for f in frames]
+        self.assertEqual(currents, sorted(currents), currents)
+        self.assertTrue(all(c <= job for c in currents), currents)
+        # The last frame is the end of the job, not 12% of a moving total.
+        self.assertEqual(currents[-1], job)
+
+    def test_a_job_that_overruns_its_declared_length_still_ends_at_100(self):
+        CNC.processed, CNC.total = 5000, 5000
+        CNC.run_reads = 3
+        with self.assertLogs(machine_mod.logger, level='WARNING') as caught:
+            prog = self.progress(4000)
+            prog.send(force=True)
+            prog.send(force=True)
+        frames = self.frames()
+        self.assertEqual([f['current'] for f in frames], [4000, 4000])
+        # Said once, not once per frame.
+        over = [ln for ln in caught.output if 'declared' in ln]
+        self.assertEqual(len(over), 1, caught.output)
+        # The raw byte position is still reported as itself.
+        self.assertEqual(frames[0]['settings']['values']['CCbp'], 5000)
+
+    # -- when it reports -------------------------------------------------
+
+    def test_a_run_reports_at_its_start_and_at_its_end(self):
+        CNC.processed, CNC.total = 0, 1000
+        CNC.run_reads = 3
+        self.m._run_loop(progress=self.progress(1000, interval=3600))
+        frames = self.frames()
+        # A long interval: only the phase changes reported.
+        self.assertEqual(len(frames), 2, frames)
+        self.assertEqual(frames[0]['current'], 0)
+        self.assertEqual(frames[-1]['current'], 1000)
+
+    def test_a_pause_and_a_resume_each_report(self):
+        CNC.processed, CNC.total = 500, 1000
+        SW.press(delay=0.05)                       # pause
+        SW.press(delay=0.40)                       # resume
+        threading.Timer(0.6, lambda: setattr(CNC, '_reads_left', 1)).start()
+        self.m._run_loop(pausable=True, progress=self.progress(1000, interval=3600))
+        self.assertEqual(job_events(), ['print:paused', 'print:resumed'])
+        # Start, pause, resume, end: four frames, and no more than the
+        # phases asked for.
+        self.assertEqual(len(self.frames()), 4)
+
+    def test_a_job_held_for_a_stalled_feed_reports_the_hold(self):
+        stall, recover = machine_mod.FEED_STALL_S, machine_mod.FEED_RECOVER_S
+        machine_mod.FEED_STALL_S, machine_mod.FEED_RECOVER_S = 0.2, 5.0
+        try:
+            feeder = FakeFeeder(written=1000)
+            self.m._feeder = feeder
+            SW._later(0.6, lambda: setattr(feeder, 'moving', True))
+            SW._later(1.2, lambda: setattr(CNC, '_reads_left', 1))
+            self.m._run_loop(pausable=True,
+                             progress=self.progress(1000, interval=3600))
+        finally:
+            machine_mod.FEED_STALL_S, machine_mod.FEED_RECOVER_S = stall, recover
+            self.m._feeder = None
+        self.assertEqual(job_events(), ['print:paused', 'print:resumed'])
+        self.assertEqual(len(self.frames()), 4)
+
+    def test_a_run_with_nothing_to_report_to_says_nothing(self):
+        # A motion or a hunt is over before a first frame would land, and
+        # the factory reports neither.
+        CNC.run_reads = 3
+        self.m._run_loop()
+        self.assertEqual(self.frames(), [])

@@ -50,6 +50,7 @@ sys.modules['gfhardware.cnc'] = _cnc_mod
 
 from gfutilities.puls import decode_all_steps                    # noqa: E402
 from gfutilities.puls.source import PulseSource                  # noqa: E402
+import gfhardware.feeder as feeder_mod                           # noqa: E402
 from gfhardware.feeder import PulseFeeder                        # noqa: E402
 
 CNC = _cnc_mod.cnc
@@ -83,6 +84,20 @@ class FakeRing:
 
     def drain(self, count):
         self.in_ring = max(0, self.in_ring - count)
+
+
+class _Declaring:
+    """A job source that says how long it is, right or wrong."""
+
+    def __init__(self, data: bytes, program_size):
+        self._data = data
+        self._at = 0
+        self.program_size = program_size
+
+    def read(self, count: int) -> bytes:
+        out = self._data[self._at:self._at + count]
+        self._at += len(out)
+        return out
 
 
 def _wait(pred, timeout=5.0):
@@ -156,6 +171,45 @@ class FeederTest(unittest.TestCase):
         self.assertIsNone(feeder.error)
         self.assertEqual(feeder.written, 4096)
         feeder.stop()
+
+    # -- how long the job is ---------------------------------------------
+    def test_the_job_total_is_the_job_before_the_feed_finishes(self):
+        # What a progress report divides by, and the reason it can be
+        # reported from the first frame: the length is known while most of
+        # the job is still waiting to be fed.
+        payload = bytes(range(256)) * 400                # 102400 bytes
+        feeder, ring = self._feeder(payload, capacity=8192, chunk=1024)
+        feeder.start()
+        self.assertTrue(feeder.wait_primed(timeout=5))
+        self.assertFalse(feeder.finished)
+        self.assertEqual(feeder.job_total, len(payload))
+        feeder.stop()
+
+    def test_a_finished_feed_reports_what_it_actually_delivered(self):
+        payload = bytes(range(256)) * 20
+        feeder, ring = self._feeder(payload, capacity=1 << 20)
+        feeder.start()
+        self.assertTrue(_wait(lambda: feeder.finished))
+        self.assertEqual(feeder.job_total, len(payload))
+        self.assertEqual(feeder.job_total, feeder.written)
+        feeder.stop()
+
+    def test_a_job_that_will_not_say_how_long_it_is_reports_no_total(self):
+        feeder = PulseFeeder(_Declaring(bytes(4096), None), FakeRing(1 << 20),
+                             chunk=1024, retry_s=0.01)
+        self.assertIsNone(feeder.job_total)
+
+    def test_a_job_that_does_not_end_where_it_said_it_would_is_named(self):
+        # The declared length is what every progress frame divided by all
+        # job long, so a job that delivers something else is worth a line.
+        feeder = PulseFeeder(_Declaring(bytes(4096), 9999), FakeRing(1 << 20),
+                             chunk=1024, retry_s=0.01)
+        with self.assertLogs(feeder_mod.logger, level='WARNING') as caught:
+            feeder.start()
+            self.assertTrue(_wait(lambda: feeder.finished))
+        feeder.stop()
+        self.assertTrue([ln for ln in caught.output
+                         if 'declared 9999' in ln and '4096' in ln], caught.output)
 
     # -- accounting ------------------------------------------------------
     def test_step_totals_match_decoding_the_whole_job(self):

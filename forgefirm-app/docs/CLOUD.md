@@ -59,7 +59,11 @@ factory's own cloud session showed that the app's progress bar rides a WSS
 "Progress reporting"). That is a UI status update, not the sensor telemetry
 this section excludes, so ForgeFIRM carries it. The bar is the operator's only
 sign a multi-hour print is advancing; going dark for hours is not a scope we
-want. Everything else above stays excluded.
+want. Everything else above stays excluded, including inside that frame: of
+the fifteen periodic tags the factory packs into it, ForgeFIRM fills the five
+that describe the job (`CAid`, `CCbp`, `CCst`, `CCxp`, `CCyp`) and leaves the
+temperatures and the IR readings out. The service already has this machine's
+settings report; it does not get a sensor feed by the side door.
 
 ## Connection and authentication
 
@@ -167,6 +171,8 @@ factory event/progress state machine is advisory):
   screen needs nothing else).
 - Unsolicited `lid:opened` / `lid:closed` — these drive the app's header state
   and trigger an immediate service `lid_image` refresh.
+- Alongside the events, a running print sends the `type:"progress"` frame
+  described below. It is a different message type, not an event.
 
 Service behavior worth knowing:
 
@@ -215,15 +221,28 @@ strings suggested. Settled by a capture of the factory's own session:
   33,291,208 → 33,553,352 → 33,815,496 in steps of 262,144 (256 KiB per
   interval): the factory live-appending to its ring, on the wire. A progress
   report of `current/total` therefore divides by a denominator that is itself
-  growing. Under ForgeFIRM's streaming feed the report must divide by the
-  feeder's own job total, never the kernel's byte counter (see
-  `CLOUD_BIG_LOAD.md` Part F).
+  growing.
 - `CCbp` reads the byte position (1009 against `current` 994 in the frame
   above), independently re-confirming it as telemetry rather than the pause
   constant an earlier reading guessed.
 
-ForgeFIRM does not send this frame yet; doing so is the F2 work, and the shape
-above is what it emits.
+**What ForgeFIRM sends.** The same frame, at the same 30 s cadence, forced at
+every phase change: the run's start, each pause and resume, each hold for a
+stalled feed, and once more where the job ends. A print is the only action
+that reports, which is what the factory does too, and its park reports under
+the print as its last leg. `current` is the byte position the kernel has
+played, so it steps back after a pause backtracks, exactly as the factory's
+does.
+
+The denominator is the one place ForgeFIRM deliberately does better. The job's
+length is known before a byte plays: a plain body carries it in its size and a
+compressed one in the gzip ISIZE trailer, so the whole job never has to be
+inflated to learn it. That figure is frozen when the run starts and every
+frame divides by it, which is why the bar means what it says under a live feed
+where the kernel's own byte total is still climbing. A job that plays past its
+declared length reports complete rather than overshooting, and says so in the
+log once. The length is named in the log at the start of every job, and a job
+that does not end where it said it would is named there too.
 
 ## Image upload
 
@@ -391,14 +410,17 @@ ForgeFIRM **never downloads or installs factory firmware.**
 
 ## Outstanding items
 
-- **Progress reporting (F2):** the carrier, the frame and the cadence are now
-  known (above, "Progress reporting"); what remains is to send it, computed
-  against the feeder's job total rather than the kernel byte counter. The
+- **Progress reporting:** sent, and not yet watched on a live service. The
+  frame, the cadence and the denominator are covered by host tests and by two
+  acceptance tests; what is owed is a print with the app in front of an
+  operator, on both a job that fits the ring and one that does not. The
   factory also reports a pause as a phase machine of ten events
   (`print:pausing_decel`, `print:pausing_backtrack`, `print:paused`,
   `print:resuming`, each with `:starting`/`:succeeded`) against the two
-  ForgeFIRM sends; matching that granularity is optional polish on the same
-  work.
+  ForgeFIRM sends; matching that granularity is optional polish, and the
+  transfer-phase frames (`<action>:download`, `<action>:upload`, position
+  only, no total) are not sent at all, since the `:starting` event already
+  says the same thing.
 - **Unobserved actions:** the live service has not been seen issuing
   `update_check`, `user_image`, or `factory_reset`; their exact expected
   payloads/acks are unconfirmed (current handlers are deliberate defaults —
