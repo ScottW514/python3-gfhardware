@@ -397,6 +397,21 @@ ForgeFIRM applies thirteen of them, and only those:
 Fan duties are honored on the scale the service uses: air assist 0 to 1023,
 exhaust and intake 0 to 65535.
 
+Five more are passed to the engine as the job's limits, riding every
+`POST /cool/state` while the job is loaded: `CMrx` and `CMrn` (the coolant
+run window, millidegrees, sent as degrees) and `EFrx`, `IFrx`, `AArx` (the
+tach maximum periods, sent as the minimum speed each means in the kernel's
+units). A tag that is absent, a sentinel (0, 1023, the signed extremes, the
+unsigned rail) or absurd is dropped and the engine's own limit stands. The
+engine applies each only where it is stricter than its configured value,
+never looser, and never to a gate the operator turned off; today the
+coolant ceiling is the one with a gate behind it, the floors wait for the
+airflow gates. The job logs what it derived (`job limits from the header:
+...`) and the engine logs what it resolved (`effective limits: ...`). The
+tach minimum periods (`AArn`, `EFrn`, `IFrn`) are maximum speeds, which
+nothing gates on; they are read so a header carrying them is not counted
+as a gap.
+
 Two more are checked rather than applied, before a byte reaches the ring:
 `MCsn`, the serial the job is locked to, and `PDfm`, the pulse-data format.
 A job addressed to another machine, or carrying a format the step decoder
@@ -559,16 +574,13 @@ the live service. What is left is below.
   image, so the factory watches coolant temperature and does not verify flow.
   ForgeFIRM's flow verification is ahead of the factory here, not behind it.
 
-  Most of this is not the cloud client's to fix. Reading a header field is one
-  line here; enforcing a tach window or a temperature ceiling belongs to the
-  machine-services daemon, which owns the thermal hardware and publishes the
-  fire verdict, and it has to hold in GRBL mode too. The client's share of
-  the file itself is done (`MCsn` and `PDfm` are refused before a byte is
-  loaded); what is left on its side is passing the rest of the envelope
-  through to the engine rather than dropping it on the floor. A limit that
-  arrives from a remote service is a limit that service can raise, so the
-  shape to aim for is a header value that can only tighten a locally
-  configured ceiling, never loosen it.
+  None of this is the cloud client's to fix. Its share is done: `MCsn` and
+  `PDfm` are refused before a byte is loaded, and the coolant window and the
+  tach windows reach the engine with every report as limits that can only
+  tighten a locally configured one (above, "The pulse header"). Enforcing a
+  tach floor or a temperature ceiling belongs to the machine-services
+  daemon, which owns the thermal hardware and publishes the fire verdict,
+  and it has to hold in GRBL mode too.
 
 - **Coolant control per job:** the forgectrl cooling engine holds the pump
   on as part of its idle posture; the `WPon` pulse-header key has no

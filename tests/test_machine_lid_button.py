@@ -16,6 +16,7 @@ events captured.
 Run:  PYTHONPATH=.:../Glowforge-Utilities python3 -m unittest tests.test_machine_lid_button
 """
 import json
+import importlib.util
 import os
 import queue
 import sys
@@ -250,6 +251,8 @@ class FakeCooling:
     def fire_ok(self): return self._fire_ok
     def verdict(self): return {'fire_ok': self._fire_ok}
     def clear_profile(self): pass
+    def set_limits(self, limits): self.limits = dict(limits)
+    def clear_limits(self): self.limits = {}
     def start(self): pass
     def profile_air_assist(self, v): pass
     def profile_exhaust(self, v): pass
@@ -300,6 +303,14 @@ def _install_fakes():
 
     coolsvc_mod = types.ModuleType('gfhardware.coolsvc')
     coolsvc_mod.cooling_svc = FakeCooling()
+    # The pure limit derivation and its tag sets come from the real module.
+    _spec = importlib.util.spec_from_file_location(
+        '_real_coolsvc', os.path.join(ROOT, 'gfhardware', 'coolsvc.py'))
+    _real = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_real)
+    coolsvc_mod.limits_from_header = _real.limits_from_header
+    coolsvc_mod.LIMIT_TAGS = _real.LIMIT_TAGS
+    coolsvc_mod.INERT_LIMIT_TAGS = _real.INERT_LIMIT_TAGS
 
     z_mod = types.ModuleType('gfhardware.z_axis')
 

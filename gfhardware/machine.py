@@ -25,7 +25,7 @@ from gfhardware._common import *
 from gfhardware.cnc import *
 from gfhardware.cooling import *
 from gfhardware.feeder import CHUNK as FEED_CHUNK, PulseFeeder
-from gfhardware.coolsvc import cooling_svc
+from gfhardware.coolsvc import cooling_svc, limits_from_header, LIMIT_TAGS, INERT_LIMIT_TAGS
 from gfhardware.leds import *
 from gfhardware.switches import *
 from gfhardware.z_axis import ZAxis
@@ -425,6 +425,7 @@ class Machine(BaseMachine):
         cnc.set_pulse_dev(None)
         cooling_svc.set_armed(False)
         cooling_svc.set_mode('idle')
+        cooling_svc.clear_limits()
 
     def _initialize(self) -> None:
         logger.debug('initializing machine')
@@ -520,6 +521,13 @@ class Machine(BaseMachine):
         self._motion_stats = stats
         logger.info('motion header: %s' % self._motion_stats['header_data'])
         self._log_header_gaps(self._motion_stats['header_data'])
+        # The job's limits go to the cooling engine with every report
+        # from here to the end of the job; the engine applies each only
+        # where it is stricter than its own.
+        limits = limits_from_header(self._motion_stats['header_data'])
+        cooling_svc.set_limits(limits)
+        logger.info('job limits from the header: %s',
+                    ' '.join('%s=%s' % kv for kv in sorted(limits.items())) or 'none')
         # Fill the ring before the operator is asked for the button, so a job
         # that cannot be loaded fails before the laser is ever armed.
         self._feeder = PulseFeeder(source, pulse_dev)
@@ -628,6 +636,7 @@ class Machine(BaseMachine):
         self._config_from_pulse('idle', self._motion_stats['header_data'])
         cooling_svc.set_mode('idle')
         cooling_svc.clear_profile()
+        cooling_svc.clear_limits()
         pos = cnc.position
         logger.info('end positions (%s, %s, %s)' % (pos.x.steps, pos.y.steps, pos.z.steps))
 
@@ -718,7 +727,7 @@ class Machine(BaseMachine):
         """
         applied = {k for k, s in MACHINE_SETTINGS.items()
                    if s.idle or s.run or s.cool_down}
-        known = applied.union(HEADER_CHECKED_KEYS, LIFECYCLE_KEYS)
+        known = applied.union(HEADER_CHECKED_KEYS, LIFECYCLE_KEYS, LIMIT_TAGS, INERT_LIMIT_TAGS)
         logger.info('job lifecycle keys: %s',
                     ' '.join('%s=%s' % (k, header.get(k, '-')) for k in LIFECYCLE_KEYS))
         gaps = sorted(k for k in header if k not in known)
@@ -1067,6 +1076,7 @@ class Machine(BaseMachine):
         cnc.laser_latch(1)
         cooling_svc.set_armed(False)
         cooling_svc.set_mode('idle')
+        cooling_svc.clear_limits()
         cooling_svc.stop = True
         self._sw_thread.stop = True
         logger.info('joining switch thread')

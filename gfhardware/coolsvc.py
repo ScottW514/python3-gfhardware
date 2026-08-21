@@ -24,6 +24,58 @@ REPORT_PERIOD_S = 1.0
 # report, the level-triggered refresh retries in a second.
 REPORT_TIMEOUT_S = 0.25
 
+# The job's operating envelope, as far as this machine carries it to the
+# engine: the pulse-header tags that bound a gate the engine has or is
+# getting, and the /cool/state parameter each becomes. The engine treats
+# each as a limit that can only tighten its own configured one; a looser
+# value is logged and ignored there (contract: forgectrl docs/SERVICES.md).
+#
+# Temperatures arrive in millidegrees. The tach windows are maximum
+# periods in the kernel's own units (the factory compares them against
+# the same sysfs attributes), so a maximum period is a minimum speed:
+# exhaust and intake report nanoseconds at 2 pulses per revolution, the
+# air assist microseconds at 8.
+LIMIT_TAGS = {
+    'CMrx': 'coolant_max_c',
+    'CMrn': 'coolant_min_c',
+    'EFrx': 'exhaust_min_rpm',
+    'IFrx': 'intake_min_rpm',
+    'AArx': 'air_assist_min_rpm',
+}
+# The tach minimum periods are maximum speeds, which nothing gates on;
+# they are read so a header carrying them is not reported as a gap.
+INERT_LIMIT_TAGS = ('AArn', 'EFrn', 'IFrn')
+# What the service writes into a field it has nothing to say about: zero,
+# the ADC rail, the signed extremes (the latter as the unsigned values a
+# header parse yields) and the unsigned rail.
+SENTINELS = frozenset((0, 1023, 0x7fffffff, 0x80000000, 0xffffffff))
+
+
+def limits_from_header(header: dict) -> dict:
+    """The per-job limits a pulse header carries, as /cool/state
+    parameters. A tag that is absent, a sentinel, or converts to a
+    number no real machine could mean yields nothing; the engine's local
+    limit stands for it."""
+    out = {}
+    for tag, name in LIMIT_TAGS.items():
+        val = header.get(tag)
+        if not isinstance(val, int) or isinstance(val, bool) or val in SENTINELS or val < 0:
+            continue
+        if tag in ('CMrx', 'CMrn'):
+            degc = val / 1000.0
+            if not 0.0 < degc < 100.0:
+                continue
+            out[name] = round(degc, 2)
+            continue
+        if tag == 'AArx':
+            rpm = 60e6 / (val * 8)       # microseconds, 8 pulses per rev
+        else:
+            rpm = 60e9 / (val * 2)       # nanoseconds, 2 pulses per rev
+        if not 1.0 <= rpm <= 100000.0:
+            continue
+        out[name] = int(round(rpm))
+    return out
+
 
 class CoolingService(Thread):
     """Client of the forgectrl cooling engine (contract: forgectrl
@@ -43,6 +95,7 @@ class CoolingService(Thread):
         self._lock = Lock()
         self._mode = 'idle'
         self._profile = {}
+        self._limits = {}
         port = os.getenv('FORGECTRL_PORT', '8080')
         self._url = 'http://127.0.0.1:%s/cool/state' % port
         Thread.__init__(self, daemon=True)
@@ -81,10 +134,22 @@ class CoolingService(Thread):
         with self._lock:
             self._profile = {}
 
+    # Per-job limits from the pulse header (limits_from_header), riding
+    # every report while the job is loaded so a lost report self-heals
+    # and the engine's effective limits follow the job, not a moment.
+    def set_limits(self, limits: dict) -> None:
+        with self._lock:
+            self._limits = dict(limits or {})
+
+    def clear_limits(self) -> None:
+        with self._lock:
+            self._limits = {}
+
     def report(self) -> None:
         with self._lock:
             params = {'mode': self._mode, 'armed': int(self.armed)}
             params.update(self._profile)
+            params.update(self._limits)
         try:
             request.urlopen(
                 request.Request('%s?%s' % (self._url, parse.urlencode(params)),
@@ -131,4 +196,5 @@ class CoolingService(Thread):
 
 cooling_svc = CoolingService()
 
-__all__ = ['cooling_svc', 'CoolingService']
+__all__ = ['cooling_svc', 'CoolingService', 'limits_from_header', 'LIMIT_TAGS',
+           'INERT_LIMIT_TAGS']
