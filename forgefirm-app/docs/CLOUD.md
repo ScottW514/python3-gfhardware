@@ -404,9 +404,8 @@ tach maximum periods, sent as the minimum speed each means in the kernel's
 units). A tag that is absent, a sentinel (0, 1023, the signed extremes, the
 unsigned rail) or absurd is dropped and the engine's own limit stands. The
 engine applies each only where it is stricter than its configured value,
-never looser, and never to a gate the operator turned off; today the
-coolant ceiling is the one with a gate behind it, the floors wait for the
-airflow gates. The job logs what it derived (`job limits from the header:
+never looser, and never to a gate the operator turned off; the coolant
+ceiling and the fan floors (the airflow gates) are the consumers. The job logs what it derived (`job limits from the header:
 ...`) and the engine logs what it resolved (`effective limits: ...`). The
 tach minimum periods (`AArn`, `EFrn`, `IFrn`) are maximum speeds, which
 nothing gates on; they are read so a header carrying them is not counted
@@ -530,19 +529,15 @@ the live service. What is left is below.
   entries are mostly per-phase idle and warm-up variants of the same few
   limits. What actually matters is the list below, and it is the reason this
   item exists:
-  - `AArn`/`AArx`, `EFrn`/`EFrx`, `IFrn`/`IFrx` are the run-phase tach windows
-    for air assist, exhaust and intake. ForgeFIRM reads every tach for the
-    dashboard and gates on none of them, so a fan that stalls mid-cut goes
-    unnoticed. The exhaust one is the fume path and is the first worth closing.
-    These particular fields are among the ones the service echoes rather than
-    fills: every captured header carries zero for all of them except `AArx`,
-    so a working gate needs locally configured thresholds and can only let a
-    header value tighten them. The factory's own policy is known even though
-    its numbers are not: a fan tach alert during a cut **pauses** the print,
-    taking the same transition a user pause takes. Two of the factory's three
-    tach monitors cannot fire at all, because they treat a zero limit as "not
-    configured", so on a factory machine a stalled extraction fan is caught by
-    the temperature it causes rather than by its tachometer.
+  - ~~`AArn`/`AArx`, `EFrn`/`EFrx`, `IFrn`/`IFrx`, the run-phase tach windows~~
+    **closed by the airflow gates:** the engine holds every fan to a locally
+    configured floor while the run profile is applied, and a header window
+    can only raise a floor for its job. The captured headers carry zero for
+    every window except `AArx`, so in practice the local floors are the
+    gate. Stricter than the factory by decision: a stalled fan is a fault
+    with no resume, where the factory pauses, and the factory's own intake
+    and exhaust monitors cannot fire at all (a zero limit reads as "not
+    configured" there).
   - `PTmn`/`PTmx` cap the power-supply temperature. Only the coolant loop gates
     today; board, head, interconnect, lid, fused and supply temperatures are
     displayed and gate nothing, though the service sends real ceilings for all
