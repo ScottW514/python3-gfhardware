@@ -442,8 +442,7 @@ class Machine(BaseMachine):
     def _lid_image(self, msg: dict, settings: dict = None) -> None:
         # The flash is the service's to ask for, per shot, and a lid image is
         # the one capture it asks about: LCfl 0 means photograph the bed as it
-        # is lit. Absent, the lamp comes on, which is what every capture did
-        # before the key was honored.
+        # is lit. Absent, the lamp comes on.
         lamp = self.lamp_level(settings)
         logger.info('capturing Lid Image (lamp %d)', lamp)
         img = cam.capture(cam.GFCAM_LID, illumination=lamp)
@@ -697,9 +696,9 @@ class Machine(BaseMachine):
                            key, setting, default)
             seconds = default
         if seconds <= 0:
-            # Worth a line rather than silence: a machine whose config still
-            # carries the zeros the old sample shipped skips a period the
-            # service assumes it took, and the log is where that shows.
+            # Worth a line rather than silence: a config that carries a zero
+            # skips a period the service assumes was taken, and the log is
+            # where that shows.
             logger.info('%s: skipped (%s = %r)', phase.replace('_', ' '),
                         key, setting)
             return 0.0
@@ -712,9 +711,9 @@ class Machine(BaseMachine):
         """Name what the job asked for that this machine does not act on.
 
         The factory takes a whole operating envelope from the pulse header;
-        this client applies the motion keys and the three run fan duties, and
-        the rest went by unremarked. Unremarked is the problem: a header key
-        with no applier is a decision, and it should be a recorded one.
+        this client applies the motion keys and the three run fan duties. A
+        header key with no applier is a decision, and it should be a recorded
+        one rather than pass unremarked.
         Returns the unhandled keys, sorted.
         """
         applied = {k for k, s in MACHINE_SETTINGS.items()

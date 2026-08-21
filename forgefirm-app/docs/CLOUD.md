@@ -2,14 +2,14 @@
 
 ForgeFIRM's optional **factory cloud mode** runs the machine under the Glowforge
 web service: the machine presents itself as a stock Glowforge, and the
-Glowforge phone/web app drives it end to end — connect homing, Set Focus,
+Glowforge phone/web app drives it end to end: connect homing, Set Focus,
 material imaging, and full prints (button press, cut, return-home). It is
 distinct from the `gfhome.py` one-shot, which borrows the service only for a
 camera-referenced homing cycle.
 
 The Glowforge protocol is undocumented and can change without notice. Each
 ForgeFIRM release validates cloud mode against one specific factory
-service/firmware version — the version it advertises as `MCov` (currently
+service/firmware version, the version it advertises as `MCov` (currently
 `2.6.0-2228`). forgectrl surfaces a compatibility warning when the live service
 moves past that baseline (see "Firmware-update policy").
 
@@ -21,7 +21,7 @@ moves past that baseline (see "Firmware-update policy").
 | `gfhome.py` (`/usr/sbin`) | One-shot service-driven homing. Invoked for `$H` when `homing_mode = gfcloud`; dispatches with `allow_print=False` so a print can never run inside a homing session. Completion is guarded: a run of near-identical service corrections aborts (the machine is not physically moving), and quiet only counts as homed when the head accelerometer witnessed real motion during the session. |
 | `ffmachine.py` (site-packages) | Shared hardware-machine glue: identity overrides from the shared config, and the forgectrl-routed capture machine both clients use. |
 | `gfutilities` | Protocol/service layer: auth, WebSocket client, action dispatch, settings report, pulse-file handling. |
-| `gfhardware` | The hardware `Machine`: motion, laser latch, switches, cameras. Thermal hardware belongs to the forgectrl cooling engine: the cloud client reports job state (`POST /cool/state`, with the pulse header's run fan duties as the per-job profile) and enforces the published verdict on its fire path — gaining the flow verification and over-temp protection the engine provides. |
+| `gfhardware` | The hardware `Machine`: motion, laser latch, switches, cameras. Thermal hardware belongs to the forgectrl cooling engine: the cloud client reports job state (`POST /cool/state`, with the pulse header's run fan duties as the per-job profile) and enforces the published verdict on its fire path, gaining the flow verification and over-temp protection the engine provides. |
 
 Camera captures route through forgectrl's snapshot endpoint (it owns the
 imx-media pipeline whenever a stream is open; the snapshot works during an
@@ -30,9 +30,9 @@ the fallback when the daemon is unreachable.
 
 **The cameras only capture with the lid closed.** This is a privacy rule, not a
 factory behavior: the lid camera faces the room once the lid is raised, and the
-service asks for images on its own schedule. Both capture paths enforce it —
-forgectrl answers `409` and the direct fallback raises `gfhardware.cam.LidOpen`
-— and the check fails closed, so an unreadable lid also refuses. There is no
+service asks for images on its own schedule. Both capture paths enforce it
+(forgectrl answers `409` and the direct fallback raises `gfhardware.cam.LidOpen`)
+and the check fails closed, so an unreadable lid also refuses. There is no
 setting to disable it. A refused image action is reported to the service as
 `<action>:failed` so it resolves rather than hanging, and the client does not
 fall back to a direct grab that would refuse identically. **Consequence:** the
@@ -45,8 +45,8 @@ the app focuses or prints.
 The factory streams continuous telemetry; ForgeFIRM does not and will not.
 Excluded channels:
 
-- `POST /api/sensor` — the binary sensor firehose.
-- WSS `type:"log"` messages — in-band advisory logs.
+- `POST /api/sensor`, the binary sensor firehose.
+- WSS `type:"log"` messages, the in-band advisory logs.
 - The `fault:*` / `estop:*` / `interlock:*` **cloud reporting** namespace.
   (Local fault-to-safe handling is independent of reporting and fully active.)
 
@@ -71,7 +71,7 @@ settings report; it does not get a sensor feed by the side door.
   path component of the WS URL, ~30 s expiry, single-use).
 - The WS client reconnects through a loop that re-runs `sign_in` for a fresh
   `ws_token` and rebuilds the URL on every reconnect.
-- The service drops the socket on its own schedule — roughly hourly in a long
+- The service drops the socket on its own schedule, roughly hourly in a long
   idle session. That is routine: the reconnect loop re-authenticates with a
   fresh `auth_token` and the machine stays signed in and serving actions
   without operator involvement.
@@ -79,11 +79,13 @@ settings report; it does not get a sensor feed by the side door.
   request itself never retries, so there is no recursion).
 - `ws_connect()` returns the running client; `GFUIService` stops it (flush
   final events, close socket, join) when the session ends. The WS client and
-  action threads are daemon threads — nothing about a session can keep the
+  action threads are daemon threads: nothing about a session can keep the
   process alive after the service loop exits.
-- TLS: standard certificate validation. (The factory additionally pins the
-  server SPKI and refuses unpinned connections; matching that is optional
-  hardening, not required for interoperability.)
+- TLS: standard certificate validation. The factory additionally pins the
+  server SPKI and refuses unpinned connections; ForgeFIRM does not pin, by
+  decision. A pin is a copy of a key the service can rotate whenever it
+  likes, and chain validation already gives interoperability everything it
+  needs.
 
 ## Wire format
 
@@ -102,7 +104,7 @@ Only `status:"ready"` starts an action; the other statuses in the protocol
 **Outgoing event envelope** (machine→server): `id` (monotonic per-connection
 counter), `timestamp` (ms since daemon start, not wall clock), `type:"event"`,
 `version:1`, `level`, `action_id` (absent on unsolicited events), `event`.
-Parser note: an event's `<action>` prefix segment can be empty — never assume
+Parser note: an event's `<action>` prefix segment can be empty; never assume
 `split(':')[0]` is non-empty.
 
 ## Actions
@@ -112,7 +114,7 @@ through a single dispatch table shared by `gfcloud` and `gfhome`:
 
 | action_type | Behavior |
 |---|---|
-| `settings` | Sends the on-demand ~600-key settings report. Machine IP, firmware/app version, and serial reach the service through this report (`MCip`, `MCov`, `MCdv`, `MCsn`) — there is no separate status endpoint. |
+| `settings` | Sends the on-demand ~600-key settings report. Machine IP, firmware/app version, and serial reach the service through this report (`MCip`, `MCov`, `MCdv`, `MCsn`); there is no separate status endpoint. |
 | `hunt` | Focus-lens homing (Z home + the service's hunt pattern + home offset). |
 | `motion` | Downloads and runs the pulse file at `motion_url`. |
 | `print` | Full print lifecycle (gfcloud only; gfhome refuses prints). |
@@ -165,7 +167,7 @@ and made available to every image handler. Policy per key:
 
 - **Honored:** `HCil` (head illumination) and `LCfl` (lid flash) are lighting
   the capture path can apply directly.
-- **Deliberately not applied:** `HCex`/`HCga`/`HCae`/`HCag` — the factory-scale
+- **Deliberately not applied:** `HCex`/`HCga`/`HCae`/`HCag`: the factory-scale
   exposure/gain values use different units than the mainline camera controls
   and would mis-expose; per-camera defaults are used instead.
 - The opening `settings` action can carry service-pushed values (e.g. the
@@ -189,7 +191,7 @@ sent zero, not that the service has nothing to say. Nothing downstream consumes
 them today, but it does mean the service is not a source of truth for any limit
 the machine itself declares.
 
-Head images are captured with the white torch off — added white light washes
+Head images are captured with the white torch off, because added white light washes
 out the measure-laser dot the cloud's focus analysis needs.
 
 ### Events emitted
@@ -203,7 +205,7 @@ factory event/progress state machine is advisory):
   `print:return_to_home:succeeded`, `print:completed`.
 - Button: `button:pressed` / `button:released` (the app's "push the button"
   screen needs nothing else).
-- Unsolicited `lid:opened` / `lid:closed` — these drive the app's header state
+- Unsolicited `lid:opened` / `lid:closed`, which drive the app's header state
   and trigger an immediate service `lid_image` refresh.
 - Alongside the events, a running print sends the `type:"progress"` frame
   described below. It is a different message type, not an event.
@@ -217,8 +219,8 @@ Service behavior worth knowing:
   flag while it runs (the factory parks with the lid open, and a park cut short
   would offset every subsequent motion until the next camera re-home);
   `print:return_to_home:succeeded` is sent only when the park actually
-  completed. A job refused before it moved (lid or interlock open at start —
-  a backstop, the app itself will not print until the lid is closed and imaged)
+  completed. A job refused before it moved (lid or interlock open at start,
+  a backstop, since the app itself will not print until the lid is closed and imaged)
   ends `:cancelled`, never `:completed`.
 - Server-side session state can be sticky: after abnormal session deaths the
   service may stall silently mid-sequence in the next session. A fresh WS
@@ -226,8 +228,8 @@ Service behavior worth knowing:
 
 ### Progress reporting
 
-The app's progress bar rides one carrier, and it is neither of the two the
-strings suggested. Settled by a capture of the factory's own session:
+The app's progress bar rides one carrier, settled by a capture of the
+factory's own session:
 
 - **The carrier is an outbound WSS `type:"progress"` frame**, machine to
   service, and nothing else. No `<action>:progress` event, and no
@@ -257,8 +259,9 @@ strings suggested. Settled by a capture of the factory's own session:
   report of `current/total` therefore divides by a denominator that is itself
   growing.
 - `CCbp` reads the byte position (1009 against `current` 994 in the frame
-  above), independently re-confirming it as telemetry rather than the pause
-  constant an earlier reading guessed.
+  above). It is telemetry, not a job parameter: the factory's own tag table
+  marks `CCbp` and `CCbt` report-only, so neither can appear in a pulse
+  header at all, and the pause constants stay in `forgefirm.conf`.
 
 **What ForgeFIRM sends.** The same frame, at the same 30 s cadence, forced at
 every phase change: the run's start, each pause and resume, each hold for a
@@ -266,7 +269,13 @@ stalled feed, and once more where the job ends. A print is the only action
 that reports, which is what the factory does too, and its park reports under
 the print as its last leg. `current` is the byte position the kernel has
 played, so it steps back after a pause backtracks, exactly as the factory's
-does.
+does. A pause is reported as the two events `print:paused` and
+`print:resumed`; the factory's ten-event pause phase machine
+(`print:pausing_decel`, `print:pausing_backtrack`, `print:paused`,
+`print:resuming`, each with `:starting`/`:succeeded`) is advisory and is
+not mirrored, and neither are its transfer-phase frames
+(`<action>:download`, `<action>:upload`), since the `:starting` event
+already says the same thing.
 
 The denominator is the one place ForgeFIRM deliberately does better. The job's
 length is known before a byte plays: a plain body carries it in its size and a
@@ -281,7 +290,7 @@ that does not end where it said it would is named there too.
 ## Image upload
 
 Image actions carry a presigned `endpoint` URL; the image is `PUT` there as a
-plain request (the presigned URL carries its own auth — a Bearer header makes
+plain request (the presigned URL carries its own auth; a Bearer header makes
 the storage backend reject it). Without `endpoint`, the legacy
 `POST /api/machines/<action_type>/<id>` fallback is used.
 
@@ -337,7 +346,7 @@ the storage backend reject it). Without `endpoint`, the legacy
     thing the machine can do, so the press is read once the job is moving
     again.
 - Post-action cleanup always locks the laser latch and drops the pulse-device
-  registration — including when an action crashes.
+  registration, including when an action crashes.
 - A job larger than the ring runs anyway: the client holds the compressed body
   in memory, fills the ring before the button is asked for, and tops it up as
   it drains, so the ring is a window onto the job rather than the place the job
@@ -352,6 +361,11 @@ the storage backend reject it). Without `endpoint`, the legacy
   failure, and the print is reported `:cancelled` like any job that never
   moved. `pulse_warn_threshold_bytes` only logs. Both are memory guards and
   neither is a ring guard: they say nothing about how long a job may be.
+  The defaults (32 MiB warn, 128 MiB refuse) are reasoned rather than
+  measured, because at the compression the service actually uses 128 MiB
+  of body is days of cutting and nothing has come near it; every job logs
+  the body it arrived as and the program it played, so the ratio the
+  guards are sized against is on record should a job ever get close.
 
 ### The pulse header
 
@@ -383,11 +397,21 @@ ForgeFIRM applies thirteen of them, and only those:
 Fan duties are honored on the scale the service uses: air assist 0 to 1023,
 exhaust and intake 0 to 65535.
 
-Everything else is dropped, but no longer silently: every job logs how many of
-its header keys have no applier here, and names them with their values at debug
-level. A key the machine does not act on is a decision, and a decision that
-leaves no trace is indistinguishable from an oversight, so each job is now also
-its own record of what the service asked for and this machine ignored.
+Two more are checked rather than applied, before a byte reaches the ring:
+`MCsn`, the serial the job is locked to, and `PDfm`, the pulse-data format.
+A job addressed to another machine, or carrying a format the step decoder
+does not know, is refused with the reason in the log (`refusing the job:`)
+and reported `:cancelled` like any job that never moved. Four lifecycle
+keys (`CFrh`, `CCwp`, `CCrp`, `CCup`) are named in the log of every job and
+drive nothing, which is what the factory does with them too (below, "A
+print's warm-up and its rest").
+
+Everything else is dropped, and not silently: every job logs how many of
+its header keys have no applier here, and names them with their values at
+debug level. A key the machine does not act on is a decision, and a
+decision that leaves no trace is indistinguishable from an oversight, so
+each job is its own record of what the service asked for and this machine
+ignored.
 
 Some of the dropping is deliberate. Thermal policy belongs to the cooling
 engine, which runs its own coolant ceiling, flow verification, emission witness
@@ -397,10 +421,10 @@ items below.
 
 ## A print's warm-up and its rest
 
-The factory holds twice around a print, and until now ForgeFIRM held neither.
-Measured on this board's own factory slot: **3.05 s** between configuring the
-run and starting it, and about **10.35 s** of rest after the park before the
-machine goes idle. A motion or a hunt gets neither, then or now.
+The factory holds twice around a print, and so does ForgeFIRM. Measured on
+a factory slot: **3.05 s** between configuring the run and starting it, and
+about **10.35 s** of rest after the park before the machine goes idle. A
+motion or a hunt gets neither.
 
 Both are equipment protection rather than ceremony. The warm-up is what gets
 air and coolant moving before the first fire; the rest is what purges the
@@ -410,9 +434,21 @@ after.
 
 `MOTION.WARM_UP_DELAY` and `MOTION.COOL_DOWN_DELAY` carry the seconds and
 default to the factory's measurements. 0 skips either, deliberately, and a
-skipped period says so in the log rather than passing in silence: a machine
-whose config was seeded from the older sample carries explicit zeros and will
-keep them until someone changes them.
+skipped period says so in the log rather than passing in silence: a config
+that carries explicit zeros keeps them until someone changes them.
+
+The pulse header looks like the source of these periods and is not. Every
+captured print header carries `CCwp` 5000 and `CCrp` 10000, with `CFrh` for
+the park, and a motion or a hunt carries none of them; the correlation is
+real and the causation is not. In the 2.6.0 application all four lifecycle
+keys (`CCrp`, `CCup`, `CCwp`, `CFrh`) are parsed, stored, copied into the
+settings batch and acted on by nothing: a tag reaches behavior either
+through a peripheral that registers it against a source or through an
+inlined lookup by index, and these four have neither. The factory's warm-up
+and rest come from somewhere other than the job, so configured periods
+defaulted to what the factory was measured doing are the right model rather
+than a placeholder. The keys stay in the per-job log line as a record of
+what the service sends.
 
 ## Firmware-update policy
 
@@ -428,11 +464,11 @@ ForgeFIRM **never downloads or installs factory firmware.**
   `{latest_gf_version, tested_against_gf, checked_at}` to
   `FACTORY_FIRMWARE.STATUS_FILE` (`/data/forgefirm/gf-latest.json`).
 - forgectrl reads that file and shows a **compatibility warning** whenever the
-  live service has moved past the tested baseline — regardless of whether a
-  newer ForgeFIRM exists — plus an **upgrade recommendation** only when one
+  live service has moved past the tested baseline, regardless of whether a
+  newer ForgeFIRM exists, plus an **upgrade recommendation** only when one
   does. The factory `.fw` is never offered.
 - `tested_against_gf` is `FACTORY_FIRMWARE.FW_VERSION` from the client's
-  configuration — the factory firmware version this build advertises as
+  configuration: the factory firmware version this build advertises as
   `MCov` and was tested against. There is no separate release-side field:
   the value travels config → `gf-latest.json` → forgectrl's status (`gfsvc`)
   → the panel banner.
@@ -450,43 +486,17 @@ ForgeFIRM **never downloads or installs factory firmware.**
 
 ## Outstanding items
 
-- **Progress reporting:** sent, and not yet watched on a live service. The
-  frame, the cadence and the denominator are covered by host tests and by two
-  acceptance tests; what is owed is a print with the app in front of an
-  operator, on both a job that fits the ring and one that does not. The
-  factory also reports a pause as a phase machine of ten events
-  (`print:pausing_decel`, `print:pausing_backtrack`, `print:paused`,
-  `print:resuming`, each with `:starting`/`:succeeded`) against the two
-  ForgeFIRM sends; matching that granularity is optional polish, and the
-  transfer-phase frames (`<action>:download`, `<action>:upload`, position
-  only, no total) are not sent at all, since the `:starting` event already
-  says the same thing.
-- ~~**Unobserved actions:**~~ **settled from the firmware**, since the live
-  service has never been seen issuing `update_check`, `user_image`,
-  `factory_reset` or `head_firmware_update` and there is no way to ask it to.
-  All four are decoded above: `user_image` is a lid capture and is
-  implemented; the other three hand off to programs this machine does not
-  have and are answered rather than performed. What is still unknown is
-  small and does not change any of that: what the service does with each
-  answer, and whether a refused `factory_reset` is retried.
-- **A live job longer than the ring:** the feed is built and covered by host
-  tests, and `cloud.oversize-stream` is written for it, but no job the ring
-  cannot hold has yet been run from the live service.
-- **The memory guards against a real ceiling:** `pulse_reject_threshold_bytes`
-  defaults to 128 MiB of compressed body, which at the compression the service
-  actually uses is days of cutting. Nothing has come close, so the number is
-  reasoned rather than measured. Every job logs the body it arrived as and the
-  program it played, so the ratio the guards are sized against accumulates in
-  the log.
-- **Packaged-path boot:** validate `gfcloud.init` autostart on a flashed image
-  with `controller_mode = cloud`.
-- **Lid-flash hardware application:** drive the lid flash LED from `LCfl` (and
-  any future exposure mapping) in gfhardware.
+Everything the bench can exercise is exercised: the `cloud.*` acceptance
+tests cover mode switching, service homing, the lid and interlock aborts,
+the button-wait cancel, a hunt with the lid open, pause and resume, the
+paused and running cancel paths, and a print longer than the ring fed from
+the live service. What is left is below.
+
 - **8 MP ("HD") machines:** an OV8856 machine captures 3264x2448, not the
   2592x1944 a 5 MP machine sends. Whether the service accepts a larger image
-  for bed alignment and focus analysis is unknown — no 8 MP machine has been
+  for bed alignment and focus analysis is unknown; no 8 MP machine has been
   on the bench.
-- **Pulse-header envelope not enforced:** nineteen of the twenty-nine header
+- **Pulse-header envelope not enforced:** seventeen of the twenty-nine header
   fields the factory requires are read and discarded. None of them can put
   energy anywhere (the hardware chain is the emission boundary and the header
   never touches it), but each one the factory arms per job is a failure mode it
@@ -528,10 +538,6 @@ ForgeFIRM **never downloads or installs factory firmware.**
     parallel, once in raw ADC counts (`CT{i,w,r}{n,x}`, where "min" is the hot
     end because the thermistors are NTCs) and once in millidegrees
     (`CM{i,w,r}{n,x}`, with `CMhl`/`CMhu` hysteresis).
-  - `MCsn` is the machine serial. The factory refuses a pulse file whose serial
-    does not match; ForgeFIRM runs it.
-  - `PDfm` declares the pulse-data format. The factory made it mandatory so it
-    could refuse a stream it does not understand; ForgeFIRM assumes the format.
   - The nine warmup-phase fan fields (`AAw*`, `EFw*`, `IFw*`) are ignored, so a
     job's requested warmup airflow is not applied.
 
@@ -556,39 +562,15 @@ ForgeFIRM **never downloads or installs factory firmware.**
   Most of this is not the cloud client's to fix. Reading a header field is one
   line here; enforcing a tach window or a temperature ceiling belongs to the
   machine-services daemon, which owns the thermal hardware and publishes the
-  fire verdict, and it has to hold in GRBL mode too. The client's share is the
-  two refusals that are purely about the file it was handed, `MCsn` and `PDfm`,
-  and passing the rest of the envelope through to the engine rather than
-  dropping it on the floor. A limit that arrives from a remote service is a
-  limit that service can raise, so the shape to aim for is a header value that
-  can only tighten a locally configured ceiling, never loosen it.
+  fire verdict, and it has to hold in GRBL mode too. The client's share of
+  the file itself is done (`MCsn` and `PDfm` are refused before a byte is
+  loaded); what is left on its side is passing the rest of the envelope
+  through to the engine rather than dropping it on the floor. A limit that
+  arrives from a remote service is a limit that service can raise, so the
+  shape to aim for is a header value that can only tighten a locally
+  configured ceiling, never loosen it.
 
-- ~~**Pause constants from the job:**~~ **refuted.** `CCbp` and `CCbt` were
-  read as the factory source of the backtrack and resume-lead counts. The
-  factory's own tag table says otherwise: both carry flags `0x01`, which is
-  not the pulse-legal bit, so neither can appear in a pulse header at all, and
-  `CCbp` sits in the periodic-settings set beside the state and X/Y position
-  tags. They are reported progress, not job parameters. The `forgefirm.conf`
-  values stand.
-- ~~**The job's own lifecycle periods:**~~ **settled, and the answer is that
-  there is nothing to drive.** `CCwp` and `CCrp` carry 5000 and 10000 in every
-  captured print header and nothing in a motion or a hunt, which read as the
-  warm-up and rest periods in milliseconds, with `CFrh` for the park. The
-  correlation is real and the causation is not: in the 2.6.0 application all
-  four of `CCrp`, `CCup`, `CCwp` and `CFrh` are parsed, stored, copied into
-  the settings batch and then acted on by nothing. A tag reaches behavior
-  either through a peripheral that registers it against a source or through
-  an inlined lookup by index, and these four have neither. The coolant flow
-  controller registers seventeen of the eighteen `CF` tags in one array and
-  the one it omits is `CFrh`; the only inlined per-tag lookup in the whole
-  image is the `MCsn` serial check. The factory's warm-up and rest come from
-  somewhere other than the job, so ForgeFIRM's configured periods, defaulted
-  to what the factory was measured doing, are the right model rather than a
-  placeholder. The keys stay in the per-job log line as a record of what the
-  service sends.
 - **Coolant control per job:** the forgectrl cooling engine holds the pump
   on as part of its idle posture; the `WPon` pulse-header key has no
-  applier — if per-job pump control is ever wanted, it belongs in the
+  applier. If per-job pump control is ever wanted, it belongs in the
   engine's per-job profile (the `/cool/state` report), not here.
-- **Optional:** SPKI pinning to match the factory client; emulator
-  (`gf-machine-emulator`) full-session parity.
