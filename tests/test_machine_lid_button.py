@@ -905,6 +905,41 @@ class JobLifecycleTests(unittest.TestCase):
                   'CCrp': 10000, 'CCup': 1}
         self.assertEqual(self.m._log_header_gaps(header), [])
 
+    def test_declared_ignored_keys_are_counted_and_not_undecided(self):
+        # The warm-up fan profile, a board ceiling, an IR threshold and the
+        # HV cap are decisions with a recorded reason; ZZzz is not.
+        header = {'STfr': 10000, 'AAwd': 1023, 'EFwd': 65535, 'BTrx': 9440,
+                  'IRwx': 275, 'HIrx': 1023, 'ZZzz': 1}
+        with self.assertLogs(machine_mod.logger, level='DEBUG') as caught:
+            gaps = self.m._log_header_gaps(header)
+        self.assertEqual(gaps, ['ZZzz'])
+        line = [ln for ln in caught.output if 'have no applier here' in ln]
+        self.assertEqual(len(line), 1, caught.output)
+        self.assertIn('6 of 7 header keys have no applier here (5 declared ignored, 1 undecided)', line[0])
+        declared = [ln for ln in caught.output if 'declared ignored: ' in ln]
+        self.assertEqual(len(declared), 1, caught.output)
+        for key in ('AAwd=1023', 'EFwd=65535', 'BTrx=9440', 'IRwx=275', 'HIrx=1023'):
+            self.assertIn(key, declared[0])
+        self.assertNotIn('ZZzz', declared[0])
+
+    def test_every_declared_key_has_a_reason_and_no_applier(self):
+        applied = {k for k, s in machine_mod.MACHINE_SETTINGS.items()
+                   if s.idle or s.run or s.cool_down}
+        for key, why in machine_mod.DECLARED_IGNORED.items():
+            self.assertEqual(len(key), 4, key)
+            self.assertTrue(why, key)
+            self.assertNotIn(key, applied, key)
+            self.assertNotIn(key, machine_mod.LIMIT_TAGS, key)
+            self.assertNotIn(key, machine_mod.INERT_LIMIT_TAGS, key)
+
+    def test_a_header_with_only_declared_keys_has_no_undecided_line(self):
+        header = {'STfr': 10000, 'TRuc': 0, 'PTmn': 0, 'PTmx': 1023}
+        with self.assertLogs(machine_mod.logger, level='DEBUG') as caught:
+            gaps = self.m._log_header_gaps(header)
+        self.assertEqual(gaps, [])
+        self.assertFalse([ln for ln in caught.output if 'keys with no applier: ' in ln], caught.output)
+        self.assertTrue([ln for ln in caught.output if '(3 declared ignored, 0 undecided)' in ln], caught.output)
+
     def test_the_lifecycle_keys_are_logged_even_when_absent(self):
         with self.assertLogs(machine_mod.logger, level='INFO') as caught:
             self.m._log_header_gaps({'STfr': 10000})

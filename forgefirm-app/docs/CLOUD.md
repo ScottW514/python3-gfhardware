@@ -383,55 +383,41 @@ operating values for the ones that matter: fan duties, per-sensor temperature
 ceilings, lid IR flame thresholds, head accelerometer limits and a high-voltage
 current cap all arrive filled in per job.
 
-ForgeFIRM applies thirteen of them, and only those:
+Every tag the service fills in has a disposition here, and the job log says
+which: each job names its lifecycle keys, counts the keys with no applier,
+and splits that count into *declared ignored* (a decision with a reason,
+listed below) and *undecided* (`N of M header keys have no applier here (D
+declared ignored, U undecided)`, the undecided ones named at debug level).
+The undecided count is the one that should be zero.
 
-| Tags | Applied to |
+| Tags | Disposition |
 |---|---|
-| `AArd`, `EFrd`, `IFrd` | run-phase fan duties, handed to the forgectrl cooling engine as the per-job profile; while the laser is armed the engine raises any of them to its configured run duty (the airflow floors were measured there), so a print's fans never run slower than the cut profile, while a hunt's `0` duties stand |
-| `STfr` | step frequency |
-| `XSrc`, `YSrc` | stepper current while running |
-| `XShc`, `YShc` | stepper current while idle |
-| `XSdm`, `YSdm` / `XSmm`, `YSmm` | decay mode / microstep mode |
-| `ZSmd` | Z mode |
+| `AArd`, `EFrd`, `IFrd` | **Applied**: the run-phase fan duties, handed to the forgectrl cooling engine as the per-job profile on the scale the service uses (air assist 0 to 1023, exhaust and intake 0 to 65535). While the laser is armed the engine raises any of them to its configured run duty (the airflow floors were measured there), so a print's fans never run slower than the cut profile, while a hunt's `0` duties stand and the hunt is measured, not judged. |
+| `STfr` | **Applied**: step frequency. |
+| `XSrc`, `YSrc` / `XShc`, `YShc` | **Applied**: stepper current while running / idle. |
+| `XSdm`, `YSdm` / `XSmm`, `YSmm` | **Applied**: decay mode / microstep mode. |
+| `ZSmd` | **Applied**: Z mode. |
+| `CMrx`, `CMrn` | **Passed through** as the job's coolant window (millidegrees, sent as degrees) on every `POST /cool/state` while the job is loaded. The engine applies each only where it is stricter than its configured value, never looser, never to a gate the operator turned off; the coolant ceiling is the consumer. |
+| `EFrx`, `IFrx`, `AArx` | **Passed through** as the tach floors (the maximum periods, sent as the minimum speed each means in the kernel's units); the airflow gates are the consumers, and a header can only raise a floor for its job. A sentinel (0, 1023, the signed extremes, the unsigned rail) or an absurd value is dropped. |
+| `AArn`, `EFrn`, `IFrn` | **Read, inert**: the tach minimum periods are maximum speeds, which nothing gates on. |
+| `MCsn`, `PDfm` | **Refused on**: the serial the job is locked to and the pulse-data format, both checked before a byte reaches the ring; a mismatch is `refusing the job:` in the log and `:cancelled` to the service. |
+| `CFrh`, `CCwp`, `CCrp`, `CCup` | **Logged**: the lifecycle keys, named in every job's log and driving nothing, which is what the factory does with them (below, "A print's warm-up and its rest"). |
+| `AAw?`, `EFw?`, `IFw?` | **Declared ignored**: the warm-up phase fan profile. The run profile covers the warm-up hold, and every captured header sets the warm-up values equal to the run values. |
+| `PTmn`, `PTmx` | **Declared ignored**: the supply temperature window. The service sends the whole ADC range (a window that cannot trip) and the factory binds the pair to nothing; the supply's raw reading is watched per job by the engine instead. |
+| `BT??`, `HT??`, `LT??`, `IT??`, `FT??` | **Declared ignored**: the board, head, lid, interconnect and fused temperature ceilings, sent in a unit that is not millidegrees and not established. The chassis (board) sensor is watched per job; the other four locations have no sensor on this platform. |
+| `CTrn`, `CTrx` | **Declared ignored**: the coolant window in raw counts, older files only; `CMrn`/`CMrx` carry the same window. |
+| `HA??` | **Declared ignored**: the head accelerometer thresholds (unit and filter unknown). The accelerometer is the motion-liveness probe here; a bench-measured crash detector is its own BRINGUP item. |
+| `IR??` | **Declared ignored**: the lid IR flame thresholds. The lid IR channels read the lid lamp, so these absolute numbers are the prior for the lamp-aware fire watch (BRINGUP "Fire watch"), not a gate. |
+| `HIix`, `HIrx` | **Declared ignored**: the HV current caps. The sampled `LASER_ON` witness covers the idle case, and HV current is ranged in every job's log line. |
+| `TRuc` | **Declared ignored**: thermal report upload conditions, a knob for the factory's telemetry, which is out of scope. |
+| `WPon` | **Declared ignored**: the pump is held on as part of the engine's idle posture; per-job pump control would belong in its per-job profile. |
+| everything else | **Undecided**: counted and named at debug level by every job. Of the 346 header-legal tags, the factory binds 283 to a source; 20 configure the client's own network backoff, 39 belong to the three fans of an air filter, the camera families are exposure and gain values the mainline driver's units do not take, and most of the rest are per-phase idle variants of the limits above. |
 
-Fan duties are honored on the scale the service uses: air assist 0 to 1023,
-exhaust and intake 0 to 65535.
-
-Five more are passed to the engine as the job's limits, riding every
-`POST /cool/state` while the job is loaded: `CMrx` and `CMrn` (the coolant
-run window, millidegrees, sent as degrees) and `EFrx`, `IFrx`, `AArx` (the
-tach maximum periods, sent as the minimum speed each means in the kernel's
-units). A tag that is absent, a sentinel (0, 1023, the signed extremes, the
-unsigned rail) or absurd is dropped and the engine's own limit stands. The
-engine applies each only where it is stricter than its configured value,
-never looser, and never to a gate the operator turned off; the coolant
-ceiling and the fan floors (the airflow gates) are the consumers. The job logs what it derived (`job limits from the header:
-...`) and the engine logs what it resolved (`effective limits: ...`). The
-tach minimum periods (`AArn`, `EFrn`, `IFrn`) are maximum speeds, which
-nothing gates on; they are read so a header carrying them is not counted
-as a gap.
-
-Two more are checked rather than applied, before a byte reaches the ring:
-`MCsn`, the serial the job is locked to, and `PDfm`, the pulse-data format.
-A job addressed to another machine, or carrying a format the step decoder
-does not know, is refused with the reason in the log (`refusing the job:`)
-and reported `:cancelled` like any job that never moved. Four lifecycle
-keys (`CFrh`, `CCwp`, `CCrp`, `CCup`) are named in the log of every job and
-drive nothing, which is what the factory does with them too (below, "A
-print's warm-up and its rest").
-
-Everything else is dropped, and not silently: every job logs how many of
-its header keys have no applier here, and names them with their values at
-debug level. A key the machine does not act on is a decision, and a
-decision that leaves no trace is indistinguishable from an oversight, so
-each job is its own record of what the service asked for and this machine
-ignored.
-
-Some of the dropping is deliberate. Thermal policy belongs to the cooling
-engine, which runs its own coolant ceiling, flow verification, emission witness
-and silence timeout, and a machine should not let a remote service raise its own
-limits. The rest is not deliberate, and the specifics are in the outstanding
-items below.
+Thermal policy is the cooling engine's, on purpose: it runs its own coolant
+ceiling and critical line, flow verification, airflow gates, emission
+witness and silence timeout, and a remote service can tighten those limits
+for a job and never loosen them. The factory's own policy, decoded from its
+firmware, is in BRINGUP's facts bank ("The factory's envelope").
 
 ## A print's warm-up and its rest
 
@@ -510,75 +496,6 @@ the live service. What is left is below.
   2592x1944 a 5 MP machine sends. Whether the service accepts a larger image
   for bed alignment and focus analysis is unknown; no 8 MP machine has been
   on the bench.
-- **Pulse-header envelope not enforced:** seventeen of the twenty-nine header
-  fields the factory requires are read and discarded. None of them can put
-  energy anywhere (the hardware chain is the emission boundary and the header
-  never touches it), but each one the factory arms per job is a failure mode it
-  watches and ForgeFIRM does not.
-
-  The whole header has now been swept rather than sampled, so the size of this
-  is known. Of the 346 tags a pulse header may carry, ForgeFIRM applies 13,
-  refuses the file on 2, and names 4 in the job log. The factory binds 283 of
-  them to a source and applies them generically, and four have no consumer
-  anywhere in the factory either. That leaves 270 tags bound there and not
-  applied here, which sounds like a mountain and is not: 20 configure the
-  client's own network backoff, where ForgeFIRM has its own policy; 39 belong
-  to the three fans of an air filter most machines do not have; the camera
-  families are the exposure and gain values deliberately not applied because
-  the mainline driver's units differ; and 42 accelerometer and 54 temperature
-  entries are mostly per-phase idle and warm-up variants of the same few
-  limits. What actually matters is the list below, and it is the reason this
-  item exists:
-  - ~~`AArn`/`AArx`, `EFrn`/`EFrx`, `IFrn`/`IFrx`, the run-phase tach windows~~
-    **closed by the airflow gates:** the engine holds every fan to a locally
-    configured floor while the run profile is applied and the laser is armed
-    (or the fan is commanded at the cut profile), and a header window can
-    only raise a floor for its job; a hunt, which the service sends with the
-    extraction fans off, is measured and not judged. The captured headers carry zero for
-    every window except `AArx`, so in practice the local floors are the
-    gate. Stricter than the factory by decision: a stalled fan is a fault
-    with no resume, where the factory pauses, and the factory's own intake
-    and exhaust monitors cannot fire at all (a zero limit reads as "not
-    configured" there).
-  - `PTmn`/`PTmx` cap the power-supply temperature. Only the coolant loop gates
-    today; board, head, interconnect, lid, fused and supply temperatures are
-    displayed and gate nothing, though the service sends real ceilings for all
-    of them. The factory runs two tiers on these: a plain temperature alert
-    pauses the print, and a `*_temp_critical` fails the machine outright. Watch
-    the units before adopting a ceiling, because they are per sensor rather
-    than universal. The coolant family is the worked example, carried twice in
-    parallel, once in raw ADC counts (`CT{i,w,r}{n,x}`, where "min" is the hot
-    end because the thermistors are NTCs) and once in millidegrees
-    (`CM{i,w,r}{n,x}`, with `CMhl`/`CMhu` hysteresis).
-  - The nine warmup-phase fan fields (`AAw*`, `EFw*`, `IFw*`) are ignored, so a
-    job's requested warmup airflow is not applied.
-
-  Beyond the required set, the header also carries head accelerometer run
-  thresholds (`HAxr`, `HAyr`, `HAar`), lid IR flame thresholds and baselines
-  (`IRwx`/`IRwc`, `IRxx`/`IRxc`, `IR?b`) and a high-voltage current cap
-  (`HIix`/`HIrx`). None has a ForgeFIRM counterpart: the head accelerometer is
-  used only as a motion-liveness probe, the IR fire watch ships disabled, and
-  beam detect is not read at all. In the factory these are graded rather than
-  uniform: an accelerometer or beam-detect *alert* pauses the print, the
-  matching *abort* aborts it, and the high-voltage current cap is in the
-  machine-unusable set alongside the critical temperatures.
-
-  One place the header is not the model to follow is the coolant loop. The
-  header carries a whole `CF` family for the factory's calorimetric flow
-  controller, with a setpoint, PI gains and a differential-temperature readout,
-  and none of it is ever sent. A stock machine reports none of those settings,
-  and the three faults the controller would raise have no raiser in the factory
-  image, so the factory watches coolant temperature and does not verify flow.
-  ForgeFIRM's flow verification is ahead of the factory here, not behind it.
-
-  None of this is the cloud client's to fix. Its share is done: `MCsn` and
-  `PDfm` are refused before a byte is loaded, and the coolant window and the
-  tach windows reach the engine with every report as limits that can only
-  tighten a locally configured one (above, "The pulse header"). Enforcing a
-  tach floor or a temperature ceiling belongs to the machine-services
-  daemon, which owns the thermal hardware and publishes the fire verdict,
-  and it has to hold in GRBL mode too.
-
 - **Coolant control per job:** the forgectrl cooling engine holds the pump
   on as part of its idle posture; the `WPon` pulse-header key has no
   applier. If per-job pump control is ever wanted, it belongs in the

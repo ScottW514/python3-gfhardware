@@ -111,6 +111,63 @@ LIFECYCLE_KEYS = ('CFrh', 'CCwp', 'CCrp', 'CCup')
 # reaches the ring.
 HEADER_CHECKED_KEYS = ('MCsn', 'PDfm')
 
+# Header keys the service fills in per job that this machine does not act
+# on, each by decision, with the decision beside it. A key in neither this
+# set nor any applier is undecided, and the per-job gap line counts those
+# separately: that count is the one that should be zero.
+DECLARED_IGNORED = {
+    # Warm-up phase fan duties and tach windows: the run profile covers the
+    # warm-up hold, and every captured header sets them equal to the run
+    # values anyway.
+    'AAwd': 'warm-up fan profile', 'AAwn': 'warm-up fan profile', 'AAwx': 'warm-up fan profile',
+    'EFwd': 'warm-up fan profile', 'EFwn': 'warm-up fan profile', 'EFwx': 'warm-up fan profile',
+    'IFwd': 'warm-up fan profile', 'IFwn': 'warm-up fan profile', 'IFwx': 'warm-up fan profile',
+    # Power-supply temperature window: the service sends the whole ADC range
+    # (a window that cannot trip) and the factory binds it to nothing; the
+    # supply's raw reading is watched per job by the cooling engine.
+    'PTmn': 'supply window, unbound in the factory', 'PTmx': 'supply window, unbound in the factory',
+    # Board, head, lid, interconnect and fused temperature ceilings: sent in a
+    # unit that is not millidegrees and not established; the chassis (board)
+    # sensor is watched per job, the others have no sensor on this platform.
+    'BTrn': 'board temperature, unit unknown', 'BTrx': 'board temperature, unit unknown',
+    'BTcx': 'board temperature, unit unknown',
+    'HTrn': 'head temperature, no sensor', 'HTrx': 'head temperature, no sensor',
+    'HTcx': 'head temperature, no sensor',
+    'LTrn': 'lid temperature, no sensor', 'LTrx': 'lid temperature, no sensor',
+    'LTcx': 'lid temperature, no sensor',
+    'ITrn': 'interconnect temperature, no sensor', 'ITrx': 'interconnect temperature, no sensor',
+    'ITcx': 'interconnect temperature, no sensor',
+    'FTrn': 'fused temperature, no sensor', 'FTrx': 'fused temperature, no sensor',
+    'FTcx': 'fused temperature, no sensor',
+    # The coolant window in raw counts: older files only; the millidegree
+    # window (CMrn/CMrx) is the one passed through.
+    'CTrn': 'coolant window in raw counts (CMrn/CMrx carry it)',
+    'CTrx': 'coolant window in raw counts (CMrn/CMrx carry it)',
+    # Head accelerometer thresholds: unit and filter unknown; the
+    # accelerometer is the motion-liveness probe here, and a crash detector
+    # is its own bench-measured item.
+    'HAxr': 'accelerometer threshold, unit unknown', 'HAyr': 'accelerometer threshold, unit unknown',
+    'HAar': 'accelerometer threshold, unit unknown', 'HAxa': 'accelerometer threshold, unit unknown',
+    'HAya': 'accelerometer threshold, unit unknown', 'HAaa': 'accelerometer threshold, unit unknown',
+    # Lid IR flame thresholds: absolute per-quartile values; the lid IR
+    # channels read the lid lamp, so these are the prior for the lamp-aware
+    # fire watch, not a gate today.
+    'IRwx': 'lid IR threshold (fire-watch prior)', 'IRwc': 'lid IR threshold (fire-watch prior)',
+    'IRxx': 'lid IR threshold (fire-watch prior)', 'IRxc': 'lid IR threshold (fire-watch prior)',
+    'IRyx': 'lid IR threshold (fire-watch prior)', 'IRyc': 'lid IR threshold (fire-watch prior)',
+    'IRzx': 'lid IR threshold (fire-watch prior)', 'IRzc': 'lid IR threshold (fire-watch prior)',
+    # High-voltage current caps: the sampled LASER_ON witness covers the idle
+    # case, and HV current is ranged in every job's log line.
+    'HIix': 'HV current cap (emission witness covers it)',
+    'HIrx': 'HV current cap (emission witness covers it)',
+    # Thermal report upload conditions: a reporting knob for the factory's
+    # telemetry, which is out of scope here.
+    'TRuc': 'thermal report upload conditions',
+    # The pump: the cooling engine holds it on as part of its idle posture;
+    # per-job pump control would belong in its per-job profile.
+    'WPon': 'pump on (the engine holds it on)',
+}
+
 # How often a running print tells the service where it has gotten to. The
 # factory's progress_update_interval_ms is 30 s and the app is built around
 # that pace, so this is protocol parity rather than a preference and lives
@@ -730,14 +787,21 @@ class Machine(BaseMachine):
         known = applied.union(HEADER_CHECKED_KEYS, LIFECYCLE_KEYS, LIMIT_TAGS, INERT_LIMIT_TAGS)
         logger.info('job lifecycle keys: %s',
                     ' '.join('%s=%s' % (k, header.get(k, '-')) for k in LIFECYCLE_KEYS))
-        gaps = sorted(k for k in header if k not in known)
-        if gaps:
-            logger.info('%d of %d header keys have no applier here',
-                        len(gaps), len(header))
+        unhandled = sorted(k for k in header if k not in known)
+        declared = [k for k in unhandled if k in DECLARED_IGNORED]
+        gaps = [k for k in unhandled if k not in DECLARED_IGNORED]
+        if unhandled:
+            logger.info('%d of %d header keys have no applier here '
+                        '(%d declared ignored, %d undecided)',
+                        len(unhandled), len(header), len(declared), len(gaps))
             # Every job is then its own capture of what the service sends and
             # this machine ignores, which is what the disposition work needs.
-            logger.debug('header keys with no applier: %s',
-                         ' '.join('%s=%s' % (k, header[k]) for k in gaps))
+            if gaps:
+                logger.debug('header keys with no applier: %s',
+                             ' '.join('%s=%s' % (k, header[k]) for k in gaps))
+            if declared:
+                logger.debug('header keys declared ignored: %s',
+                             ' '.join('%s=%s' % (k, header[k]) for k in declared))
         return gaps
 
     def _retrace(self, backtrack: int) -> tuple:
