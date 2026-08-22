@@ -411,7 +411,7 @@ The undecided count is the one that should be zero.
 | `HIix`, `HIrx` | **Declared ignored**: the HV current caps. The sampled `LASER_ON` witness covers the idle case, and HV current is ranged in every job's log line. |
 | `TRuc` | **Declared ignored**: thermal report upload conditions, a knob for the factory's telemetry, which is out of scope. |
 | `WPon` | **Declared ignored**: the pump is held on as part of the engine's idle posture; per-job pump control would belong in its per-job profile. |
-| everything else | **Undecided**: counted and named at debug level by every job. Of the 346 header-legal tags, the factory binds 283 to a source; 20 configure the client's own network backoff, 39 belong to the three fans of an air filter, the camera families are exposure and gain values the mainline driver's units do not take, and most of the rest are per-phase idle variants of the limits above. |
+| everything else | **Undecided**: counted and named at debug level by every job. Of the 346 header-legal tags, the factory binds 283 to a source; 20 configure the client's own network backoff, 39 belong to the three fans of an air filter, the camera families are exposure and gain values the mainline driver's units do not take, and most of the rest are per-phase idle variants of the limits above. A hunt header from the live service leaves 49 undecided today. |
 
 Thermal policy is the cooling engine's, on purpose: it runs its own coolant
 ceiling and critical line, flow verification, airflow gates, emission
