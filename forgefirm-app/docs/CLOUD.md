@@ -387,7 +387,7 @@ ForgeFIRM applies thirteen of them, and only those:
 
 | Tags | Applied to |
 |---|---|
-| `AArd`, `EFrd`, `IFrd` | run-phase fan duties, handed to the forgectrl cooling engine as the per-job profile |
+| `AArd`, `EFrd`, `IFrd` | run-phase fan duties, handed to the forgectrl cooling engine as the per-job profile; while the laser is armed the engine raises any of them to its configured run duty (the airflow floors were measured there), so a print's fans never run slower than the cut profile, while a hunt's `0` duties stand |
 | `STfr` | step frequency |
 | `XSrc`, `YSrc` | stepper current while running |
 | `XShc`, `YShc` | stepper current while idle |
@@ -531,8 +531,10 @@ the live service. What is left is below.
   item exists:
   - ~~`AArn`/`AArx`, `EFrn`/`EFrx`, `IFrn`/`IFrx`, the run-phase tach windows~~
     **closed by the airflow gates:** the engine holds every fan to a locally
-    configured floor while the run profile is applied, and a header window
-    can only raise a floor for its job. The captured headers carry zero for
+    configured floor while the run profile is applied and the laser is armed
+    (or the fan is commanded at the cut profile), and a header window can
+    only raise a floor for its job; a hunt, which the service sends with the
+    extraction fans off, is measured and not judged. The captured headers carry zero for
     every window except `AArx`, so in practice the local floors are the
     gate. Stricter than the factory by decision: a stalled fan is a fault
     with no resume, where the factory pauses, and the factory's own intake
